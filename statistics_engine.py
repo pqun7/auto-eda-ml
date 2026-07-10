@@ -8,14 +8,14 @@ instances from `ml_toolkit.schema`. No side effects, no global state.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
 
 from ml_toolkit.config import MLToolkitConfig, default_config
-from ml_toolkit.exceptions import DataValidationError
+from ml_toolkit.exceptions import DataValidationError, StatisticsError
 from ml_toolkit.schema import (
     CategoricalProfile,
     CorrelationPair,
@@ -148,13 +148,9 @@ class StatisticsEngine:
         -------
         MissingReport
         """
-        total_rows = len(self.df)
         total_missing = self.df.isna().sum().sum()
         missing_by_col = self.df.isna().sum()
-        if total_rows > 0:
-            missing_pct = (100.0 * missing_by_col / total_rows).round(2)
-        else:
-            missing_pct = pd.Series(0.0, index=missing_by_col.index, dtype=float)
+        missing_pct = (100.0 * missing_by_col / len(self.df)).round(2)
 
         cols_with_missing = missing_by_col[missing_by_col > 0].index.tolist()
 
@@ -503,7 +499,7 @@ class StatisticsEngine:
     # ------------------------------------------------------------------
     # Full analysis convenience
     # ------------------------------------------------------------------
-    def run_full_analysis(self) -> Dict[str, Any]:
+    def run_full_analysis(self) -> Dict[str, any]:
         """Execute all statistical computations and return a dictionary
         of dataclass objects.
 

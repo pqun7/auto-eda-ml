@@ -8,7 +8,7 @@ optional `ax` for composability and return the figure.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,40 +19,14 @@ from ml_toolkit.config import MLToolkitConfig, default_config
 from ml_toolkit.schema import (
     CorrelationPair,
     FeatureProfile,
+    NumericDistributionProfile,
     OutlierReport,
     TargetProfile,
 )
 
 # ------------------------------------------------------------------
-# Internal helpers
+# Plot configuration helper
 # ------------------------------------------------------------------
-def _get_profiles(analysis_result: Dict[str, Any]) -> List[FeatureProfile]:
-    return analysis_result.get("feature_profiles", [])
-
-
-def _get_outliers(analysis_result: Dict[str, Any]) -> List[OutlierReport]:
-    return analysis_result.get("outliers", [])
-
-
-def _get_correlations(analysis_result: Dict[str, Any]) -> List[CorrelationPair]:
-    return analysis_result.get("correlation_pairs", [])
-
-
-def _get_target_profile(analysis_result: Dict[str, Any]) -> Optional[TargetProfile]:
-    return analysis_result.get("target_profile")
-
-
-def _get_missing_columns(df: pd.DataFrame, max_cols: int = 50) -> List[str]:
-    """Return up to ``max_cols`` columns that contain missing values.
-
-    Columns are ordered by descending missing count so the heatmap shows the
-    most informative subset when the dataset has many sparse columns.
-    """
-    missing_counts = df.isnull().sum()
-    missing_counts = missing_counts[missing_counts > 0].sort_values(ascending=False)
-    return missing_counts.index[:max_cols].tolist()
-
-
 def _apply_style(config: MLToolkitConfig) -> None:
     """Set global Seaborn style and palette from config."""
     sns.set_style(config.plot_style)
@@ -105,6 +79,7 @@ def plot_numeric_distributions(
     )
     fig.suptitle("Numeric Feature Distributions", fontsize=16)
 
+    # Build outlier lookup
     outlier_dict = {o.column: o for o in outliers}
 
     for i, prof in enumerate(profs_to_plot):
@@ -112,7 +87,7 @@ def plot_numeric_distributions(
         num = prof.numeric_profile
         data = df[col].dropna()
 
-        # Histogram + KDE
+        # --- Histogram + KDE ---
         ax_hist = axes[i, 0]
         sns.histplot(data, kde=True, ax=ax_hist, color="steelblue",
                      edgecolor="white")
@@ -132,12 +107,14 @@ def plot_numeric_distributions(
         ax_hist.set_title(f"{col} (skew={num.skewness:.2f})")
         ax_hist.legend(loc="upper right")
 
-        # Boxplot
+        # --- Boxplot ---
         ax_box = axes[i, 1]
         sns.boxplot(x=data, ax=ax_box, color="lightblue")
         ax_box.set_title(f"{col} boxplot")
         if num:
-            ax_box.set_xlabel(f"Min={num.min:.2f}, Max={num.max:.2f}")
+            ax_box.set_xlabel(
+                f"Min={num.min:.2f}, Max={num.max:.2f}"
+            )
 
     plt.tight_layout()
     return fig
@@ -173,12 +150,15 @@ def plot_target_distribution(
     data = df[target_col].dropna()
 
     fig, axes = plt.subplots(1, 2, figsize=(cfg.figure_size[0], 5))
+    # Distribution
     if target_profile.is_regression:
         sns.histplot(data, kde=True, ax=axes[0], color="teal")
         axes[0].set_title(f"Target distribution: {target_col}")
+        # Boxplot
         sns.boxplot(x=data, ax=axes[1], color="lightgreen")
         axes[1].set_title(f"Target boxplot: {target_col}")
     else:
+        # Classification
         value_counts = data.value_counts()
         axes[0].bar(value_counts.index.astype(str), value_counts.values,
                     color="salmon")
@@ -215,11 +195,12 @@ def plot_correlation_heatmap(
     if not correlation_pairs:
         return None
 
-    # Gather columns present in high-correlation pairs
+    # Get list of columns that appear in correlations
     cols_in_corr = set()
     for pair in correlation_pairs:
         cols_in_corr.add(pair.feature_a)
         cols_in_corr.add(pair.feature_b)
+    # Compute full correlation matrix only for those columns
     numeric_cols = [c for c in cols_in_corr if c in df.columns]
     if len(numeric_cols) < 2:
         return None
@@ -263,6 +244,7 @@ def plot_top_correlations_bar(
     cfg = config or default_config
     _apply_style(cfg)
 
+    # Sort by absolute coefficient descending
     sorted_pairs = sorted(pairs, key=lambda x: abs(x.coefficient), reverse=True)
     top_pairs = sorted_pairs[:top_n]
 
@@ -283,7 +265,7 @@ def plot_top_correlations_bar(
 
 
 # ------------------------------------------------------------------
-# Missing values heatmap
+# Missing values visualisation
 # ------------------------------------------------------------------
 def plot_missing_heatmap(
     df: pd.DataFrame,
@@ -301,17 +283,17 @@ def plot_missing_heatmap(
     -------
     matplotlib.figure.Figure or None
     """
-    cols = _get_missing_columns(df)
-    if not cols:
-        return None
-
+    # Limit to 50 columns for readability
+    cols = df.columns[:50]
     missing_data = df[cols].isnull()
+    if not missing_data.any().any():
+        return None
 
     cfg = config or default_config
     _apply_style(cfg)
 
     fig, ax = plt.subplots(figsize=(cfg.figure_size[0], 0.5 * len(cols)))
-    # Downsample rows if > 5000 for performance
+    # Downsample rows if > 5000
     if len(df) > 5000:
         idx = np.random.choice(len(df), 5000, replace=False)
         missing_data = missing_data.iloc[idx]
@@ -325,7 +307,7 @@ def plot_missing_heatmap(
 
 
 # ------------------------------------------------------------------
-# Outlier summary
+# Outlier summary plot
 # ------------------------------------------------------------------
 def plot_outlier_summary(
     analysis_result: Dict[str, Any],
@@ -350,6 +332,7 @@ def plot_outlier_summary(
     cfg = config or default_config
     _apply_style(cfg)
 
+    # Filter out zero outliers
     non_zero = [o for o in outliers if o.outlier_count > 0]
     if not non_zero:
         return None
@@ -371,7 +354,7 @@ def plot_outlier_summary(
 
 
 # ------------------------------------------------------------------
-# Target correlations bar
+# Feature correlation with target (numeric)
 # ------------------------------------------------------------------
 def plot_target_correlations(
     df: pd.DataFrame,
@@ -407,8 +390,11 @@ def plot_target_correlations(
     cfg = config or default_config
     _apply_style(cfg)
 
+    # Compute correlations with target (this is a simple pandas operation,
+    # not a heavy statistics computation)
     corrs = df[numeric_cols].corrwith(df[target_col]).drop(target_col)
     corrs_sorted = corrs.abs().sort_values(ascending=False).head(top_n)
+    # Get signed values
     signed_corrs = corrs[corrs_sorted.index]
 
     fig, ax = plt.subplots(figsize=(cfg.figure_size[0], 0.5 * len(signed_corrs)))
@@ -424,3 +410,22 @@ def plot_target_correlations(
         ax.text(v + 0.01 if v >= 0 else v - 0.08, i, f"{v:.2f}", va="center")
     plt.tight_layout()
     return fig
+
+
+# ------------------------------------------------------------------
+# Helper getters (repeated for clarity)
+# ------------------------------------------------------------------
+def _get_profiles(analysis_result: Dict[str, Any]) -> List[FeatureProfile]:
+    return analysis_result.get("feature_profiles", [])
+
+
+def _get_outliers(analysis_result: Dict[str, Any]) -> List[OutlierReport]:
+    return analysis_result.get("outliers", [])
+
+
+def _get_correlations(analysis_result: Dict[str, Any]) -> List[CorrelationPair]:
+    return analysis_result.get("correlation_pairs", [])
+
+
+def _get_target_profile(analysis_result: Dict[str, Any]) -> Optional[TargetProfile]:
+    return analysis_result.get("target_profile")

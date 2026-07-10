@@ -100,7 +100,7 @@ class MLToolkitConfig:
     # ----------------------------------------------------------------
     # Reproducibility
     # ----------------------------------------------------------------
-    random_state: int = 67
+    random_state: int = 42
 
     # ----------------------------------------------------------------
     # Additional settings may be added in the future.

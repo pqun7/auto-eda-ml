@@ -18,15 +18,15 @@ import io
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.figure
-import matplotlib.pyplot as plt
 import pandas as pd
 
 from ml_toolkit.config import MLToolkitConfig, default_config
 from ml_toolkit.exceptions import ReportError
-from ml_toolkit.recommendation_utils import normalize_recommendation_items
 from ml_toolkit.schema import (
+    Recommendation,
     FeatureProfile,
     CorrelationPair,
+    MissingColumnReport,
     OutlierReport,
     TargetProfile,
 )
@@ -209,9 +209,12 @@ class ReportGenerator:
             lines.append("[Recommendations Summary]")
             for category in ["imputation", "outlier_handling", "transformation",
                              "scaling", "encoding", "feature_engineering", "feature_selection"]:
-                recs = normalize_recommendation_items(self.recommendations.get(category))
-                for r in recs[:3]:
-                    lines.append(f"  [{category}] {r.action}")
+                recs = self.recommendations.get(category, [])
+                if isinstance(recs, list):
+                    for r in recs[:3]:
+                        lines.append(f"  [{category}] {r.action}")
+                elif hasattr(recs, 'action'):  # single Recommendation for scaling
+                    lines.append(f"  [{category}] {recs.action}")
             lines.append("")
 
         # Models
@@ -319,11 +322,14 @@ class ReportGenerator:
             md.append("## Recommendations\n")
             for cat in ["imputation", "outlier_handling", "transformation",
                         "scaling", "encoding", "feature_engineering", "feature_selection"]:
-                recs = normalize_recommendation_items(self.recommendations.get(cat))
-                if recs:
+                recs = self.recommendations.get(cat, [])
+                if isinstance(recs, list) and recs:
                     md.append(f"### {cat.replace('_', ' ').title()}\n")
                     for r in recs:
                         md.append(f"- **{r.action}** (confidence: {r.confidence:.2f})")
+                elif hasattr(recs, 'action'):
+                    md.append(f"### {cat.replace('_', ' ').title()}\n")
+                    md.append(f"- **{recs.action}** (confidence: {recs.confidence:.2f})")
             md.append("")
 
         # Models
@@ -460,12 +466,15 @@ class ReportGenerator:
             html_parts.append("<h2>Recommendations</h2>")
             for cat in ["imputation", "outlier_handling", "transformation",
                         "scaling", "encoding", "feature_engineering", "feature_selection"]:
-                recs = normalize_recommendation_items(self.recommendations.get(cat))
-                if recs:
+                recs = self.recommendations.get(cat, [])
+                if isinstance(recs, list) and recs:
                     html_parts.append(f"<h3>{cat.replace('_', ' ').title()}</h3><ul>")
                     for r in recs:
                         html_parts.append(f"<li><strong>{r.action}</strong> (confidence: {r.confidence:.2f})</li>")
                     html_parts.append("</ul>")
+                elif hasattr(recs, 'action'):
+                    html_parts.append(f"<h3>{cat.replace('_', ' ').title()}</h3><ul>")
+                    html_parts.append(f"<li><strong>{recs.action}</strong> (confidence: {recs.confidence:.2f})</li></ul>")
 
         # Model recommendations
         model_recs = self.recommendations.get("models", [])

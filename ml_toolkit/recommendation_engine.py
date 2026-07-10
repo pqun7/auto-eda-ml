@@ -88,12 +88,15 @@ class RecommendationEngine:
         self,
         feature_profiles: List[FeatureProfile],
         missing_report: MissingReport,
-        outlier_columns: List[str],
+        outlier_columns: Optional[List[str]] = None,
     ) -> List[Recommendation]:
         """Suggest imputation strategies per column with missing values."""
         recs = []
         if not missing_report.columns_with_missing:
             return recs
+
+        if outlier_columns is None:
+            outlier_columns = getattr(self, "_outlier_columns", [])
 
         # Map column to profile for quick lookup
         profile_map = {p.column: p for p in feature_profiles}

@@ -19,7 +19,7 @@ responsible for a single domain concern:
 """
 
 __version__ = "0.1.0"
-__author__ = "Your Name <your.email@example.com>"
+__author__ = "Ali <alinazer30@gmail.com>"
 
 # Expose the most commonly used classes at package level
 from ml_toolkit.config import MLToolkitConfig, default_config

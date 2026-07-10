@@ -16,8 +16,8 @@ import pandas as pd
 from ml_toolkit.config import MLToolkitConfig, default_config
 from ml_toolkit.exceptions import DataValidationError
 from ml_toolkit.recommendation_engine import RecommendationEngine
+from ml_toolkit.recommendation_utils import normalize_recommendation_items
 from ml_toolkit.statistics_engine import StatisticsEngine
-from ml_toolkit.schema import Recommendation
 
 
 class EDAAnalyzer:
@@ -187,6 +187,9 @@ class EDAAnalyzer:
             self.run()
 
         result = self._analysis_result
+        if result is None:
+            raise RuntimeError("Analysis failed to produce a result.")
+
         meta = result["metadata"]
         dup = result["duplicates"]
         miss = result["missing"]
@@ -204,12 +207,9 @@ class EDAAnalyzer:
         lines.append("")
         lines.append("Key recommendations:")
         for category in ["imputation", "outlier_handling", "transformation", "scaling", "encoding"]:
-            cat_recs = rec.get(category, [])
-            if isinstance(cat_recs, list):
-                for r in cat_recs[:2]:  # top 2 per category
-                    lines.append(f"  [{r.category}] {r.action}")
-            elif isinstance(cat_recs, Recommendation):
-                lines.append(f"  [scaling] {cat_recs.action}")
+            cat_recs = normalize_recommendation_items(rec.get(category))
+            for r in cat_recs[:2]:  # top 2 per category
+                lines.append(f"  [{r.category}] {r.action}")
         return "\n".join(lines)
 
 
