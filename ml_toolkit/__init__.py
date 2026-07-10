@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Ali Nazer
+# Licensed under the MIT License.
+# See the LICENSE file in the project root for license information.
 """
 ml_toolkit — A professional machine learning toolkit for EDA,
 preprocessing, feature engineering, and modeling.
