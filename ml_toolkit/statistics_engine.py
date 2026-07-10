@@ -280,15 +280,22 @@ class StatisticsEngine:
                 max=np.nan,
             )
 
+        # Safe rounding helper for numpy scalars / non-numeric values
+        def _safe_round(val, nd=4):
+            try:
+                return round(float(val), nd)
+            except Exception:
+                return np.nan
+
         # Percentiles
         percentiles = {
-            "1%": round(series.quantile(0.01), 4),
-            "5%": round(series.quantile(0.05), 4),
-            "25%": round(series.quantile(0.25), 4),
-            "50%": round(series.quantile(0.50), 4),
-            "75%": round(series.quantile(0.75), 4),
-            "95%": round(series.quantile(0.95), 4),
-            "99%": round(series.quantile(0.99), 4),
+            "1%": _safe_round(series.quantile(0.01), 4),
+            "5%": _safe_round(series.quantile(0.05), 4),
+            "25%": _safe_round(series.quantile(0.25), 4),
+            "50%": _safe_round(series.quantile(0.50), 4),
+            "75%": _safe_round(series.quantile(0.75), 4),
+            "95%": _safe_round(series.quantile(0.95), 4),
+            "99%": _safe_round(series.quantile(0.99), 4),
         }
 
         mean_val = series.mean()
@@ -315,17 +322,17 @@ class StatisticsEngine:
         return NumericDistributionProfile(
             column=col,
             count=len(series),
-            mean=round(mean_val, 4),
-            median=round(median_val, 4),
-            std=round(std_val, 4),
-            cv=round(cv_val, 4) if not np.isnan(cv_val) else np.nan,
-            min=round(series.min(), 4),
-            max=round(series.max(), 4),
+            mean=_safe_round(mean_val, 4),
+            median=_safe_round(median_val, 4),
+            std=_safe_round(std_val, 4),
+            cv=_safe_round(cv_val, 4) if not np.isnan(cv_val) else np.nan,
+            min=_safe_round(series.min(), 4),
+            max=_safe_round(series.max(), 4),
             percentiles=percentiles,
-            skewness=round(sk, 4) if not np.isnan(sk) else np.nan,
-            kurtosis=round(ku, 4) if not np.isnan(ku) else np.nan,
-            zero_percent=round(zero_pct, 2),
-            negative_percent=round(neg_pct, 2),
+            skewness=_safe_round(sk, 4) if not np.isnan(sk) else np.nan,
+            kurtosis=_safe_round(ku, 4) if not np.isnan(ku) else np.nan,
+            zero_percent=_safe_round(zero_pct, 2),
+            negative_percent=_safe_round(neg_pct, 2),
             is_categorical_like=is_categorical_like,
             unique_count=unique_count,
         )
@@ -345,13 +352,12 @@ class StatisticsEngine:
             )
 
         unique_count = series.nunique()
-        top_categories = (
-            series.value_counts()
-            .head(5)
-            .reset_index()
-            .rename(columns={"index": "category", col: "count"})
-            .to_dict(orient="records")
-        )
+        top_df = series.value_counts().head(5).reset_index()
+        top_df.columns = ["category", "count"]   # safe even if col == "index"
+        top_categories: List[Dict[str, Any]] = [
+            {"category": row["category"], "count": int(row["count"])}
+            for row in top_df.to_dict(orient="records")
+        ]
         mode = series.mode().iloc[0] if not series.mode().empty else None
 
         return CategoricalProfile(
