@@ -1,3 +1,4 @@
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 # ML Toolkit
 
 ML Toolkit is a modular Python library for exploratory data analysis, statistical recommendations, preprocessing pipeline generation, and feature engineering guidance for tabular datasets.
