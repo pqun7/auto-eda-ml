@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.pipeline import Pipeline
 
 from preml.config import MLToolkitConfig
@@ -124,6 +125,26 @@ class TestConfig:
         cfg = MLToolkitConfig()
         assert cfg.low_cardinality_threshold == 10
 
+    def test_updated_config_defaults(self):
+        cfg = MLToolkitConfig()
+        assert cfg.missing_threshold == 0.25
+        assert cfg.correlation_threshold == 0.8
+        assert cfg.skewness_threshold == 1.0
+        assert cfg.n_jobs == -1
+
+    def test_adapt_to_dataset_returns_self_and_updates_thresholds(self):
+        cfg = MLToolkitConfig()
+        df = pd.DataFrame(
+            {
+                "num": np.arange(0, 1500),
+                "cat": ["A"] * 1500,
+            }
+        )
+        returned = cfg.adapt_to_dataset(df)
+        assert returned is cfg
+        # small-ish dataset keeps correlation threshold conservative high bound
+        assert cfg.correlation_threshold >= 0.8
+
 
 class TestRecommendationUtils:
     def test_normalize_recommendation_items(self):
@@ -161,6 +182,24 @@ class TestModelUtils:
 
         assert "accuracy" in scores
         assert len(scores["accuracy"]) == 2
+
+    def test_cross_validate_integer_regression_target(self):
+        X = pd.DataFrame({"x": np.arange(30), "z": np.arange(30) * 2})
+        # Integer dtype but semantically regression target
+        y = np.array([i * 3 for i in range(30)], dtype=int)
+        model = Pipeline([("estimator", RandomForestRegressor(random_state=42))])
+
+        scores = cross_validate(
+            model,
+            X,
+            y,
+            cv=3,
+            scoring="r2",
+            random_state=42,
+        )
+
+        assert "r2" in scores
+        assert len(scores["r2"]) == 3
 
 
 class TestFeatureEngineering:

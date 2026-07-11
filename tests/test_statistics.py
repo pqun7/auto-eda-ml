@@ -121,11 +121,8 @@ class TestMissing:
 
     def test_missing_report_empty_dataframe(self):
         df = pd.DataFrame(columns=["a", "b"])
-        se = StatisticsEngine(df)
-        miss = se.compute_missing_report()
-        assert miss.total_missing == 0
-        assert miss.columns_with_missing == []
-        assert miss.column_reports == []
+        with pytest.raises(DataValidationError, match="empty"):
+            StatisticsEngine(df)
 
 
 class TestOutliers:
@@ -158,6 +155,11 @@ class TestFeatureProfiles:
         assert len(profiles) == 4  # excluding target
         col_names = {p.column for p in profiles}
         assert col_names == {"num1", "num2", "cat1", "cat2"}
+
+    def test_target_column_excluded_from_profiles(self, sample_df):
+        se = StatisticsEngine(sample_df, target="target")
+        profiles = se.compute_feature_profiles()
+        assert "target" not in {p.column for p in profiles}
 
     def test_numeric_profile_content(self, engine):
         profiles = engine.compute_feature_profiles()

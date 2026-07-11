@@ -106,6 +106,29 @@ class TestPreprocessingBuilder:
         assert isinstance(transformed, np.ndarray)
         assert transformed.shape[0] == 5
 
+    def test_fit_then_transform_returns_ndarray(self, builder):
+        train_df = pd.DataFrame({
+            "num": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "cat": ["A", "B", "A", "C", "B"],
+        })
+        test_df = pd.DataFrame({
+            "num": [6.0, 7.0],
+            "cat": ["A", "C"],
+        })
+
+        out = builder.fit(train_df).transform(test_df)
+        assert isinstance(out, np.ndarray)
+        assert out.shape[0] == 2
+
+    def test_transform_before_fit_raises_actionable_error(self, builder):
+        df = pd.DataFrame({
+            "num": [1.0, 2.0],
+            "cat": ["A", "B"],
+        })
+
+        with pytest.raises(PreprocessingError, match="not fitted"):
+            builder.transform(df)
+
     def test_constant_columns_are_dropped(self):
         profiles = [
             FeatureProfile(column="const", dtype="float64",
