@@ -8,36 +8,29 @@ PipelineSuggestions, and ModelRecommendations.  No computation of
 statistics happens here; all decisions are derived from the supplied
 evidence.
 
-Improvements applied:
-- Full input validation with clear error messages.
-- All thresholds are configurable (via MLToolkitConfig) with safe defaults.
-- Model recommendations consider missing values, high cardinality,
-  and optionally XGBoost / LightGBM availability.
-- The pipeline suggestion is built from actual pre‑processing needs.
-- Correlation / feature‑engineering suggestions filtered by configurable thresholds.
-- `summarize()` provides a formatted, human‑readable report.
-- Robust against empty / malformed data.
+Thresholds are configured via :class:`MLToolkitConfig` with sensible
+defaults.  The engine considers missing values, outliers, skewness,
+cardinality, and multicollinearity to generate actionable advice.
+Model recommendations adapt to dataset size, presence of missing
+values, and (optionally) the availability of XGBoost / LightGBM.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import RecommendationError
 from preml.schema import (
-    CategoricalProfile,
     CorrelationPair,
     DatasetMetadata,
     DuplicateReport,
     Evidence,
     FeatureProfile,
     InfiniteReport,
-    MissingColumnReport,
     MissingReport,
     ModelRecommendation,
-    NumericDistributionProfile,
     OutlierReport,
     PipelineSuggestion,
     Recommendation,
@@ -47,22 +40,19 @@ from preml.schema import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Attempt to import advanced gradient boosting libraries.
+# Optional gradient boosting libraries
 # ---------------------------------------------------------------------------
 try:
     import xgboost as xgb  # noqa: F401
-
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
 
 try:
-    import lightgbm as lgb  # noqa: F401
-
+    import lightgbm  # noqa: F401
     LIGHTGBM_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional dependency
     LIGHTGBM_AVAILABLE = False
-    lgb = None  # type: ignore
 
 
 class RecommendationEngine:
@@ -71,23 +61,12 @@ class RecommendationEngine:
     Parameters
     ----------
     config : MLToolkitConfig, optional
-        Configuration controlling thresholds and behaviour.  The config
-        object may (and should) define the following attributes:
-
-        - missing_threshold : float (default 0.3)
-        - skewness_threshold : float (default 1.0)
-        - correlation_threshold : float (default 0.7)
-        - low_cardinality_threshold : int (default 10)
-        - high_cardinality_threshold : int (default 50)
-        - outlier_threshold_percent : float (default 5.0)
-        - random_state : int (default 42)
-
-        If an attribute is missing, the default shown above is used.
-
+        Configuration controlling thresholds and behaviour.
+        See :class:`MLToolkitConfig` for all available parameters.
     enable_feature_engineering : bool
         If True, the engine may suggest feature engineering steps
         (e.g. ratios, interactions) based on statistical patterns.
-        Such suggestions never rely on column names.
+        These suggestions never rely on column names.
     """
 
     def __init__(
@@ -97,23 +76,6 @@ class RecommendationEngine:
     ) -> None:
         self.config = config or default_config
         self.enable_feature_engineering = enable_feature_engineering
-
-        # Pull configurable thresholds with safe defaults.
-        self.missing_threshold = getattr(self.config, "missing_threshold", 0.3)
-        self.skewness_threshold = getattr(self.config, "skewness_threshold", 1.0)
-        self.correlation_threshold = getattr(
-            self.config, "correlation_threshold", 0.7
-        )
-        self.low_cardinality_threshold = getattr(
-            self.config, "low_cardinality_threshold", 10
-        )
-        self.high_cardinality_threshold = getattr(
-            self.config, "high_cardinality_threshold", 50
-        )
-        self.outlier_threshold_percent = getattr(
-            self.config, "outlier_threshold_percent", 5.0
-        )
-        self.random_state = getattr(self.config, "random_state", 42)
 
         # Internal cache for outlier column names (set during imputation step).
         self._outlier_columns: List[str] = []
@@ -163,12 +125,11 @@ class RecommendationEngine:
 
         for col_report in missing_report.column_reports:
             col = col_report.column
-            miss_pct: float = col_report.missing_percent  # already a percentage (0-100)
+            miss_pct = col_report.missing_percent  # already a percentage (0-100)
             stats: Dict[str, Any] = {"missing_percent": miss_pct}
 
             # When missing ratio exceeds the threshold, raise a high‑level flag.
-            # missing_threshold is a ratio (0-1), so multiply by 100 to compare.
-            if miss_pct > self.missing_threshold * 100:
+            if miss_pct > self.config.missing_threshold * 100:
                 recs.append(
                     self._make_recommendation(
                         category="imputation",
@@ -180,7 +141,7 @@ class RecommendationEngine:
                         confidence=0.9,
                         reasons=[
                             f"Missing ratio exceeds threshold "
-                            f"({self.missing_threshold*100:.0f}%)."
+                            f"({self.config.missing_threshold*100:.0f}%)."
                         ],
                         stats=stats,
                         risks=[
@@ -249,6 +210,7 @@ class RecommendationEngine:
     ) -> List[Recommendation]:
         """Generate recommendations for features with outliers."""
         recs: List[Recommendation] = []
+        threshold = getattr(self.config, "outlier_threshold_percent", 5.0)
         for out in outlier_reports:
             if out.outlier_count == 0:
                 continue
@@ -256,7 +218,7 @@ class RecommendationEngine:
                 "outlier_count": out.outlier_count,
                 "outlier_percent": out.outlier_percent,
             }
-            if out.outlier_percent > self.outlier_threshold_percent:
+            if out.outlier_percent > threshold:
                 action = (
                     f"Column '{out.column}': significant outlier ratio "
                     f"({out.outlier_percent:.1f}%). Investigate source "
@@ -293,17 +255,18 @@ class RecommendationEngine:
     ) -> List[Recommendation]:
         """Suggest transformations for skewed numeric features."""
         recs: List[Recommendation] = []
+        skew_threshold = self.config.skewness_threshold
         for prof in feature_profiles:
             if not prof.numeric_profile:
                 continue
             num = prof.numeric_profile
             sk = num.skewness
-            if abs(sk) < self.skewness_threshold:
+            if abs(sk) < skew_threshold:
                 continue
 
             col = prof.column
             stats = {"skewness": sk}
-            if sk > self.skewness_threshold:
+            if sk > skew_threshold:
                 if num.min is not None and num.min >= 0:
                     action = (
                         f"Column '{col}': apply log1p transform to "
@@ -377,7 +340,11 @@ class RecommendationEngine:
     ) -> List[Recommendation]:
         """Suggest encoding strategies for categorical features."""
         recs: List[Recommendation] = []
-        # Categorical features
+        low_threshold = getattr(
+            self.config, "low_cardinality_threshold", 10
+        )
+        high_threshold = self.config.high_cardinality_threshold  # not used directly but available
+
         for prof in feature_profiles:
             if prof.categorical_profile:
                 cat = prof.categorical_profile
@@ -389,7 +356,7 @@ class RecommendationEngine:
                         f"Column '{prof.column}': binary encoding or keep as 0/1."
                     )
                     confidence = 0.95
-                elif cat.unique_count <= self.low_cardinality_threshold:
+                elif cat.unique_count <= low_threshold:
                     action = (
                         f"Column '{prof.column}': One-Hot Encoding "
                         "(low cardinality)."
@@ -444,23 +411,31 @@ class RecommendationEngine:
         """Suggest feature engineering based on statistical patterns.
 
         Only activated when `self.enable_feature_engineering` is True.
+
+        .. todo::
+            The ratio/interaction logic here duplicates functionality in
+            :class:`~preml.feature_engineering.FeatureEngineering`.  In a
+            future refactoring, the recommendation engine should delegate
+            to that module instead of maintaining parallel code.
         """
         if not self.enable_feature_engineering:
             return []
 
         recs: List[Recommendation] = []
+        corr_threshold = self.config.correlation_threshold
+
         # Strong correlations → redundancy warning
         strong_pairs = [
             pair
             for pair in correlation_pairs
-            if abs(pair.coefficient) >= self.correlation_threshold
+            if abs(pair.coefficient) >= corr_threshold
         ]
         if strong_pairs:
             top_pair = max(strong_pairs, key=lambda x: abs(x.coefficient))
             abs_corr = abs(top_pair.coefficient)
             # Confidence increases with correlation strength
-            confidence = 0.65 + (min(abs_corr, 1.0) - self.correlation_threshold) * (
-                0.3 / (1.0 - self.correlation_threshold + 1e-9)
+            confidence = 0.65 + (min(abs_corr, 1.0) - corr_threshold) * (
+                0.3 / (1.0 - corr_threshold + 1e-9)
             )
             recs.append(
                 self._make_recommendation(
@@ -526,8 +501,9 @@ class RecommendationEngine:
     ) -> List[Recommendation]:
         """Advise on highly correlated features (above config threshold)."""
         recs: List[Recommendation] = []
+        corr_threshold = self.config.correlation_threshold
         for pair in correlation_pairs:
-            if abs(pair.coefficient) < self.correlation_threshold:
+            if abs(pair.coefficient) < corr_threshold:
                 continue
             recs.append(
                 self._make_recommendation(
@@ -569,7 +545,6 @@ class RecommendationEngine:
         num_cols = [p.column for p in feature_profiles if p.numeric_profile]
         cat_cols = [p.column for p in feature_profiles if p.categorical_profile]
 
-        # Determine if any numeric column is marked as having outliers
         has_outlier_column = (
             outlier_columns is not None
             and any(col in outlier_columns for col in num_cols)
@@ -621,6 +596,148 @@ class RecommendationEngine:
     # ==================================================================
     # EVIDENCE‑BASED MODEL RECOMMENDATIONS
     # ==================================================================
+
+    # ------------------------------------------------------------------
+    # Internal helpers for model recommendation building
+    # ------------------------------------------------------------------
+    def _add_baseline_model(
+        self, models: List[ModelRecommendation], task_type: str
+    ) -> None:
+        """Append the default linear baseline (Linear/LogisticRegression)."""
+        if task_type == "regression":
+            models.append(
+                ModelRecommendation(
+                    model_name="LinearRegression",
+                    suitability="baseline",
+                    reason="Simple, interpretable baseline.",
+                    conditions=["Scale features."],
+                    hyperparams={},
+                )
+            )
+        else:
+            models.append(
+                ModelRecommendation(
+                    model_name="LogisticRegression",
+                    suitability="baseline",
+                    reason="Probabilistic baseline for classification.",
+                    conditions=["Scale features."],
+                    hyperparams={
+                        "max_iter": 1000,
+                        "random_state": self.config.random_state,
+                    },
+                )
+            )
+
+    def _add_tree_ensemble_models(
+        self,
+        models: List[ModelRecommendation],
+        task_type: str,
+        has_multicollinearity: bool,
+        is_large: bool,
+        n_features: int,
+        has_missing: bool,
+    ) -> None:
+        """Add RandomForest, GradientBoosting, and optionally HistGradientBoosting."""
+        reg = task_type == "regression"
+        rf_name = "RandomForestRegressor" if reg else "RandomForestClassifier"
+        gb_name = "GradientBoostingRegressor" if reg else "GradientBoostingClassifier"
+        hist_name = (
+            "HistGradientBoostingRegressor"
+            if reg
+            else "HistGradientBoostingClassifier"
+        )
+
+        models.append(
+            ModelRecommendation(
+                model_name=rf_name,
+                suitability="excellent" if not has_multicollinearity else "good",
+                reason="Handles non‑linearity and does not require scaling.",
+                conditions=["Tune n_estimators (100‑500) and max_depth (5‑30)."],
+                hyperparams={
+                    "n_estimators": 200,
+                    "random_state": self.config.random_state,
+                },
+            )
+        )
+
+        gb_suitability = "excellent" if (is_large and n_features > 3) else "good"
+        models.append(
+            ModelRecommendation(
+                model_name=gb_name,
+                suitability=gb_suitability,
+                reason="Sequential ensemble; often best performance on tabular data.",
+                conditions=[
+                    "Tune learning_rate (0.01‑0.2), n_estimators (100‑1000), max_depth (3‑10)."
+                ],
+                hyperparams={
+                    "n_estimators": 200,
+                    "learning_rate": 0.1,
+                    "random_state": self.config.random_state,
+                },
+            )
+        )
+
+        if has_missing:
+            models.append(
+                ModelRecommendation(
+                    model_name=hist_name,
+                    suitability="good",
+                    reason="Native support for missing values; faster than standard GBDT.",
+                    conditions=[
+                        "No need for imputation.",
+                        "Tune max_iter, learning_rate, max_depth.",
+                    ],
+                    hyperparams={
+                        "max_iter": 200,
+                        "learning_rate": 0.1,
+                        "random_state": self.config.random_state,
+                    },
+                )
+            )
+
+    def _add_optional_xgboost_lightgbm(
+        self,
+        models: List[ModelRecommendation],
+        task_type: str,
+        is_small: bool,
+    ) -> None:
+        """Add XGBoost and LightGBM models if libraries are available."""
+        reg = task_type == "regression"
+        if XGBOOST_AVAILABLE:
+            xgb_name = "XGBRegressor" if reg else "XGBClassifier"
+            models.append(
+                ModelRecommendation(
+                    model_name=xgb_name,
+                    suitability="excellent",
+                    reason="XGBoost: highly optimized, handles missing values and regularization.",
+                    conditions=[
+                        "Tune n_estimators, max_depth, learning_rate, subsample."
+                    ],
+                    hyperparams={
+                        "n_estimators": 200,
+                        "max_depth": 6,
+                        "learning_rate": 0.1,
+                        "random_state": self.config.random_state,
+                    },
+                )
+            )
+        if LIGHTGBM_AVAILABLE:
+            lgb_name = "LGBMRegressor" if reg else "LGBMClassifier"
+            models.append(
+                ModelRecommendation(
+                    model_name=lgb_name,
+                    suitability="excellent" if not is_small else "good",
+                    reason="LightGBM: fast, handles large data and categorical features.",
+                    conditions=["Tune num_leaves, learning_rate, n_estimators."],
+                    hyperparams={
+                        "n_estimators": 200,
+                        "num_leaves": 31,
+                        "learning_rate": 0.1,
+                        "random_state": self.config.random_state,
+                    },
+                )
+            )
+
     def _model_recommendations(
         self,
         target_profile: Optional[TargetProfile],
@@ -660,13 +777,16 @@ class RecommendationEngine:
                 for p in feature_profiles
                 if p.numeric_profile and p.numeric_profile.count > 0
             ]
-            n_samples = max(counts) if counts else 1000
+            if counts:
+                n_samples = max(counts)
+            else:
+                logger.debug("No numeric profile counts available; assuming n_samples=1000.")
+                n_samples = 1000
 
         n_features = len([p for p in feature_profiles if not p.is_constant])
 
-        # Data characteristics
         has_multicollinearity = any(
-            abs(pair.coefficient) >= self.correlation_threshold
+            abs(pair.coefficient) >= self.config.correlation_threshold
             for pair in correlation_pairs
         )
         has_outliers = any(o.outlier_count > 0 for o in outlier_reports)
@@ -682,11 +802,7 @@ class RecommendationEngine:
                 has_missing, is_large, is_small, is_high_dimensional,
             )
         else:
-            n_classes = (
-                target_profile.n_unique
-                if hasattr(target_profile, "n_unique")
-                else 0
-            )
+            n_classes = target_profile.n_unique
             models = self._classification_model_recommendations(
                 n_samples, n_features, is_binary, n_classes,
                 has_multicollinearity, has_outliers,
@@ -711,18 +827,8 @@ class RecommendationEngine:
         """Build regression model suggestions based on data flags."""
         models: List[ModelRecommendation] = []
 
-        # Baseline
-        models.append(
-            ModelRecommendation(
-                model_name="LinearRegression",
-                suitability="baseline",
-                reason="Simple, interpretable baseline.",
-                conditions=["Scale features."],
-                hyperparams={},
-            )
-        )
+        self._add_baseline_model(models, "regression")
 
-        # Multicollinearity handlers
         if has_multicollinearity:
             models.append(
                 ModelRecommendation(
@@ -730,7 +836,7 @@ class RecommendationEngine:
                     suitability="excellent",
                     reason="Multicollinearity detected. ElasticNet combines L1/L2 regularization.",
                     conditions=["Scale features.", "Use l1_ratio in [.1,.5,.7,.9,.99,1]."],
-                    hyperparams={"cv": 5, "random_state": self.random_state},
+                    hyperparams={"cv": 5, "random_state": self.config.random_state},
                 )
             )
             models.append(
@@ -749,11 +855,10 @@ class RecommendationEngine:
                         suitability="good",
                         reason="L1 regularization for automatic feature selection.",
                         conditions=["Scale features.", "Use LassoCV."],
-                        hyperparams={"cv": 5, "random_state": self.random_state},
+                        hyperparams={"cv": 5, "random_state": self.config.random_state},
                     )
                 )
 
-        # Outlier robust
         if has_outliers:
             models.append(
                 ModelRecommendation(
@@ -765,88 +870,12 @@ class RecommendationEngine:
                 )
             )
 
-        # Tree‑based ensembles
-        models.append(
-            ModelRecommendation(
-                model_name="RandomForestRegressor",
-                suitability="excellent" if not has_multicollinearity else "good",
-                reason="Handles non‑linearity and does not require scaling.",
-                conditions=["Tune n_estimators (100‑500) and max_depth (5‑30)."],
-                hyperparams={
-                    "n_estimators": 200,
-                    "random_state": self.random_state,
-                },
-            )
+        self._add_tree_ensemble_models(
+            models, "regression", has_multicollinearity,
+            is_large, n_features, has_missing,
         )
+        self._add_optional_xgboost_lightgbm(models, "regression", is_small)
 
-        models.append(
-            ModelRecommendation(
-                model_name="GradientBoostingRegressor",
-                suitability="excellent" if (is_large and n_features > 3) else "good",
-                reason="Sequential ensemble; often best performance on tabular data.",
-                conditions=[
-                    "Tune learning_rate (0.01‑0.2), n_estimators (100‑1000), max_depth (3‑10)."
-                ],
-                hyperparams={
-                    "n_estimators": 200,
-                    "learning_rate": 0.1,
-                    "random_state": self.random_state,
-                },
-            )
-        )
-
-        # Native missing value support
-        if has_missing:
-            models.append(
-                ModelRecommendation(
-                    model_name="HistGradientBoostingRegressor",
-                    suitability="good",
-                    reason="Native support for missing values; faster than standard GBDT.",
-                    conditions=[
-                        "No need for imputation.",
-                        "Tune max_iter, learning_rate, max_depth.",
-                    ],
-                    hyperparams={
-                        "max_iter": 200,
-                        "learning_rate": 0.1,
-                        "random_state": self.random_state,
-                    },
-                )
-            )
-
-        # Advanced libraries
-        if XGBOOST_AVAILABLE:
-            models.append(
-                ModelRecommendation(
-                    model_name="XGBRegressor",
-                    suitability="excellent",
-                    reason="XGBoost: highly optimized, handles missing values and regularization.",
-                    conditions=["Tune n_estimators, max_depth, learning_rate, subsample."],
-                    hyperparams={
-                        "n_estimators": 200,
-                        "max_depth": 6,
-                        "learning_rate": 0.1,
-                        "random_state": self.random_state,
-                    },
-                )
-            )
-        if LIGHTGBM_AVAILABLE:
-            models.append(
-                ModelRecommendation(
-                    model_name="LGBMRegressor",
-                    suitability="excellent" if not is_small else "good",
-                    reason="LightGBM: fast, handles large data and categorical features.",
-                    conditions=["Tune num_leaves, learning_rate, n_estimators."],
-                    hyperparams={
-                        "n_estimators": 200,
-                        "num_leaves": 31,
-                        "learning_rate": 0.1,
-                        "random_state": self.random_state,
-                    },
-                )
-            )
-
-        # Small/medium data models
         if not is_large:
             models.append(
                 ModelRecommendation(
@@ -869,18 +898,16 @@ class RecommendationEngine:
                 )
             )
 
-        # Interpretable baseline
         models.append(
             ModelRecommendation(
                 model_name="DecisionTreeRegressor",
                 suitability="conditional",
                 reason="Highly interpretable; prone to overfitting.",
                 conditions=["Tune max_depth (3‑10)."],
-                hyperparams={"max_depth": 5, "random_state": self.random_state},
+                hyperparams={"max_depth": 5, "random_state": self.config.random_state},
             )
         )
 
-        # Large data options
         if is_large:
             models.append(
                 ModelRecommendation(
@@ -890,7 +917,7 @@ class RecommendationEngine:
                     conditions=["Scale features.", "Tune alpha and penalty."],
                     hyperparams={
                         "penalty": "elasticnet",
-                        "random_state": self.random_state,
+                        "random_state": self.config.random_state,
                     },
                 )
             )
@@ -912,18 +939,8 @@ class RecommendationEngine:
     ) -> List[ModelRecommendation]:
         """Build classification model suggestions."""
         models: List[ModelRecommendation] = []
-        task_label = "binary" if is_binary else "multiclass"
 
-        # Baseline
-        models.append(
-            ModelRecommendation(
-                model_name="LogisticRegression",
-                suitability="baseline",
-                reason=f"Probabilistic baseline for {task_label} classification.",
-                conditions=["Scale features."],
-                hyperparams={"max_iter": 1000, "random_state": self.random_state},
-            )
-        )
+        self._add_baseline_model(models, "classification")
 
         if has_multicollinearity or is_high_dimensional:
             models.append(
@@ -936,84 +953,16 @@ class RecommendationEngine:
                         "cv": 5,
                         "solver": "saga",
                         "max_iter": 2000,
-                        "random_state": self.random_state,
+                        "random_state": self.config.random_state,
                     },
                 )
             )
 
-        # Tree ensembles
-        models.append(
-            ModelRecommendation(
-                model_name="RandomForestClassifier",
-                suitability="excellent" if not has_multicollinearity else "good",
-                reason="Robust, no scaling, feature importance.",
-                conditions=["Tune n_estimators (100‑500), max_depth (5‑30)."],
-                hyperparams={
-                    "n_estimators": 200,
-                    "random_state": self.random_state,
-                },
-            )
+        self._add_tree_ensemble_models(
+            models, "classification", has_multicollinearity,
+            is_large, n_features, has_missing,
         )
-
-        models.append(
-            ModelRecommendation(
-                model_name="GradientBoostingClassifier",
-                suitability="excellent" if (is_large and n_features > 3) else "good",
-                reason="Sequential ensemble; high accuracy.",
-                conditions=["Tune learning_rate, n_estimators, max_depth."],
-                hyperparams={
-                    "n_estimators": 200,
-                    "learning_rate": 0.1,
-                    "random_state": self.random_state,
-                },
-            )
-        )
-
-        if has_missing:
-            models.append(
-                ModelRecommendation(
-                    model_name="HistGradientBoostingClassifier",
-                    suitability="good",
-                    reason="Native missing value support.",
-                    conditions=["No imputation needed.", "Tune max_iter, learning_rate."],
-                    hyperparams={
-                        "max_iter": 200,
-                        "learning_rate": 0.1,
-                        "random_state": self.random_state,
-                    },
-                )
-            )
-
-        if XGBOOST_AVAILABLE:
-            models.append(
-                ModelRecommendation(
-                    model_name="XGBClassifier",
-                    suitability="excellent",
-                    reason="XGBoost: handles missing, regularization, GPU support.",
-                    conditions=["Tune n_estimators, max_depth, learning_rate."],
-                    hyperparams={
-                        "n_estimators": 200,
-                        "max_depth": 6,
-                        "learning_rate": 0.1,
-                        "random_state": self.random_state,
-                    },
-                )
-            )
-        if LIGHTGBM_AVAILABLE:
-            models.append(
-                ModelRecommendation(
-                    model_name="LGBMClassifier",
-                    suitability="excellent" if not is_small else "good",
-                    reason="LightGBM: fast, handles categorical features.",
-                    conditions=["Tune num_leaves, learning_rate, n_estimators."],
-                    hyperparams={
-                        "n_estimators": 200,
-                        "num_leaves": 31,
-                        "learning_rate": 0.1,
-                        "random_state": self.random_state,
-                    },
-                )
-            )
+        self._add_optional_xgboost_lightgbm(models, "classification", is_small)
 
         if not is_large:
             models.append(
@@ -1056,7 +1005,7 @@ class RecommendationEngine:
                 suitability="conditional",
                 reason="Interpretable, but prone to overfitting.",
                 conditions=["Tune max_depth."],
-                hyperparams={"max_depth": 5, "random_state": self.random_state},
+                hyperparams={"max_depth": 5, "random_state": self.config.random_state},
             )
         )
 
@@ -1067,7 +1016,7 @@ class RecommendationEngine:
                     suitability="conditional",
                     reason="Scales to large data; supports various losses.",
                     conditions=["Scale features.", "loss='log' for probabilities."],
-                    hyperparams={"loss": "log", "random_state": self.random_state},
+                    hyperparams={"loss": "log", "random_state": self.config.random_state},
                 )
             )
 
@@ -1214,6 +1163,10 @@ class RecommendationEngine:
     @staticmethod
     def summarize(recommendations: Dict[str, Any]) -> str:
         """Return a human‑readable summary of the recommendations.
+
+        .. note::
+            This static method is a presentation utility.  It may be
+            relocated to a dedicated formatter module in a future version.
 
         Parameters
         ----------

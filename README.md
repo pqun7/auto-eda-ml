@@ -1,6 +1,22 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 # PreML
 
+Production‑ready machine learning toolkit for EDA, preprocessing, and modelling.
+
+## 📌 Features
+- Fast and automated Exploratory Data Analysis (EDA).
+- Robust preprocessing pipelines.
+- Production-ready machine learning modelling wrappers.
+
+## ⚙️ Installation
+
+You can install `pypreml` via pip:
+
+```bash
+pip install pypreml
+```
+
+
 PreML is a modular Python library for exploratory data analysis, statistical recommendations, preprocessing pipeline generation, and feature engineering guidance for tabular datasets.
 
 The source code now lives inside the `preml/` package directory, which keeps the project organized and matches the installed namespace.

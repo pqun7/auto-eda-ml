@@ -5,23 +5,32 @@ This module consumes the output of the EDA analysis and creates
 a sklearn ColumnTransformer / Pipeline tailored to the dataset.
 It does NOT recompute statistics; it only translates facts and
 recommendations into preprocessing steps.
+
+Example
+-------
+>>> from preml.eda import EDAAnalyzer
+>>> from preml.preprocessing import PreprocessingBuilder
+>>> analyzer = EDAAnalyzer(df, target='price')
+>>> result = analyzer.run()
+>>> builder = PreprocessingBuilder(result)
+>>> pipeline = builder.build_pipeline()
+>>> X_transformed = builder.fit_transform(df)  # or pipeline.fit_transform(df)
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+import logging
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import KNNImputer, SimpleImputer
+from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
-    MinMaxScaler,
     OneHotEncoder,
     OrdinalEncoder,
     PowerTransformer,
-    QuantileTransformer,
     RobustScaler,
     StandardScaler,
 )
@@ -30,9 +39,12 @@ from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import PreprocessingError
 from preml.schema import (
     FeatureProfile,
+    OutlierReport,
     Recommendation,
-    TargetProfile,
 )
+
+logger = logging.getLogger(__name__)
+
 
 # ------------------------------------------------------------------
 # Internal helpers
@@ -43,10 +55,10 @@ def _get_feature_profiles(
     return analysis_result.get("feature_profiles", [])
 
 
-def _get_target_profile(
+def _get_outlier_reports(
     analysis_result: Dict[str, Any],
-) -> Optional[TargetProfile]:
-    return analysis_result.get("target_profile")
+) -> List[OutlierReport]:
+    return analysis_result.get("outliers", [])
 
 
 def _get_recommendations(
@@ -66,7 +78,12 @@ class PreprocessingBuilder:
     analysis_result : dict
         The dictionary returned by `EDAAnalyzer.run()`.
     config : MLToolkitConfig, optional
-        Configuration object (used for random state).
+        Configuration object (used for random state and thresholds).
+
+    Raises
+    ------
+    PreprocessingError
+        If required keys are missing from *analysis_result*.
     """
 
     def __init__(
@@ -74,10 +91,24 @@ class PreprocessingBuilder:
         analysis_result: Dict[str, Any],
         config: Optional[MLToolkitConfig] = None,
     ) -> None:
+        if not isinstance(analysis_result, dict):
+            raise PreprocessingError(
+                "analysis_result must be a dictionary (the output of EDAAnalyzer.run())."
+            )
+
+        # Validate required sections
+        if "feature_profiles" not in analysis_result:
+            raise PreprocessingError(
+                "Missing key 'feature_profiles' in analysis_result."
+            )
+        if "recommendations" not in analysis_result:
+            raise PreprocessingError(
+                "Missing key 'recommendations' in analysis_result."
+            )
+
         self.analysis = analysis_result
         self.config = config or default_config
         self.feature_profiles = _get_feature_profiles(analysis_result)
-        self.target_profile = _get_target_profile(analysis_result)
         self.recommendations = _get_recommendations(analysis_result)
 
         # Categorise columns
@@ -95,21 +126,28 @@ class PreprocessingBuilder:
             elif prof.categorical_profile:
                 self.categorical_cols.append(prof.column)
 
-        # Determine which numeric columns are flagged for transformation
+        # Determine which numeric columns are skewed based on actual skewness
         self.skewed_cols: List[str] = []
-        transformation_recs = self.recommendations.get("transformation", [])
-        for rec in transformation_recs:
-            for col in self.numeric_cols:
-                if col in rec.action:
-                    self.skewed_cols.append(col)
+        for prof in self.feature_profiles:
+            if prof.column in self.numeric_cols and prof.numeric_profile:
+                if abs(prof.numeric_profile.skewness) >= self.config.skewness_threshold:
+                    self.skewed_cols.append(prof.column)
 
-        # Detect if any numeric column has outliers (for scaling strategy)
-        self.has_outliers = False
-        outlier_recs = self.recommendations.get("outlier_handling", [])
-        for rec in outlier_recs:
-            if any(col in rec.action for col in self.numeric_cols):
-                self.has_outliers = True
-                break
+        # Detect if any numeric column has outliers (using actual outlier reports)
+        outlier_reports = _get_outlier_reports(analysis_result)
+        self.has_outliers = any(
+            o.column in self.numeric_cols and o.outlier_count > 0
+            for o in outlier_reports
+        ) or bool(self.recommendations.get("outlier_handling"))
+
+        logger.debug(
+            "Columns: numeric=%d skewed=%d categorical=%d cat_like=%d has_outliers=%s",
+            len(self.numeric_cols),
+            len(self.skewed_cols),
+            len(self.categorical_cols),
+            len(self.categorical_like_cols),
+            self.has_outliers,
+        )
 
     def build_pipeline(self) -> ColumnTransformer:
         """Build a scikit‑learn ColumnTransformer with appropriate
@@ -144,19 +182,28 @@ class PreprocessingBuilder:
         # 2. Categorical pipelines
         # ------------------------------------------------------------------
         if self.categorical_cols:
-            # Split by cardinality
             low_card, high_card = self._split_categorical_by_cardinality()
             if low_card:
                 cat_low_pipe = Pipeline(steps=[
                     ("imputer", SimpleImputer(strategy="most_frequent")),
-                    ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+                    (
+                        "onehot",
+                        OneHotEncoder(
+                            handle_unknown="ignore", sparse_output=False
+                        ),
+                    ),
                 ])
                 transformers.append(("cat_low", cat_low_pipe, low_card))
                 all_used_columns.extend(low_card)
             if high_card:
                 cat_high_pipe = Pipeline(steps=[
                     ("imputer", SimpleImputer(strategy="most_frequent")),
-                    ("ordinal", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)),
+                    (
+                        "ordinal",
+                        OrdinalEncoder(
+                            handle_unknown="use_encoded_value", unknown_value=-1
+                        ),
+                    ),
                 ])
                 transformers.append(("cat_high", cat_high_pipe, high_card))
                 all_used_columns.extend(high_card)
@@ -167,15 +214,24 @@ class PreprocessingBuilder:
         if self.categorical_like_cols:
             catlike_pipe = Pipeline(steps=[
                 ("imputer", SimpleImputer(strategy="most_frequent")),
-                ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+                (
+                    "onehot",
+                    OneHotEncoder(
+                        handle_unknown="ignore", sparse_output=False
+                    ),
+                ),
             ])
-            transformers.append(("cat_like", catlike_pipe, self.categorical_like_cols))
+            transformers.append(
+                ("cat_like", catlike_pipe, self.categorical_like_cols)
+            )
             all_used_columns.extend(self.categorical_like_cols)
 
         # ------------------------------------------------------------------
         # 4. Any remaining columns (should be none, but fallback)
         # ------------------------------------------------------------------
-        all_dataset_cols = [p.column for p in self.feature_profiles if not p.is_constant]
+        all_dataset_cols = [
+            p.column for p in self.feature_profiles if not p.is_constant
+        ]
         remaining = sorted(set(all_dataset_cols) - set(all_used_columns))
         if remaining:
             # Fallback: pass-through (should not happen normally)
@@ -197,8 +253,7 @@ class PreprocessingBuilder:
         """Internal helper to create a numeric sub‑pipeline."""
         # Imputation strategy
         strategy = "median" if self.has_outliers else "mean"
-        steps = []
-        steps.append(("imputer", SimpleImputer(strategy=strategy)))
+        steps = [("imputer", SimpleImputer(strategy=strategy))]
 
         # Optional power transformation for skewed data
         if apply_power:
@@ -218,14 +273,19 @@ class PreprocessingBuilder:
         The threshold is taken from the config (`high_cardinality_threshold`).
         """
         threshold = self.config.high_cardinality_threshold
-        low = []
-        high = []
+        low, high = [], []
         for col in self.categorical_cols:
-            prof = next((p for p in self.feature_profiles if p.column == col), None)
+            prof = next(
+                (p for p in self.feature_profiles if p.column == col), None
+            )
             if prof and prof.categorical_profile:
                 n_unique = prof.categorical_profile.unique_count
             else:
-                # Fallback: assume low cardinality
+                logger.warning(
+                    "Categorical column '%s' not found in feature profiles; "
+                    "assuming low cardinality.",
+                    col,
+                )
                 n_unique = threshold
             if n_unique <= threshold:
                 low.append(col)
@@ -244,8 +304,10 @@ class PreprocessingBuilder:
         Returns
         -------
         np.ndarray
-            Transformed feature array.
+            Transformed feature array (dense, since all encoders use
+            ``sparse_output=False``).
         """
         pipeline = self.build_pipeline()
         transformed = pipeline.fit_transform(df)
+        # The pipeline guarantees dense output (no sparse matrices).
         return np.asarray(transformed)

@@ -1,12 +1,12 @@
 # PreML
 
-**PreML** is a Python library that automates exploratory data analysis, preprocessing, feature engineering, baseline model training, and report generation for tabular machine learning projects.
+> **PreML** is a production-ready Python library for automating the most repetitive stages of tabular machine learning workflows. It performs exploratory data analysis (EDA), statistical profiling, preprocessing pipeline generation, feature engineering recommendations, baseline model evaluation, visualization, and professional report generation—all while remaining transparent, configurable, and fully compatible with the Scikit-learn ecosystem.
 
-It generates evidence-based recommendations and builds `scikit-learn`-compatible preprocessing pipelines while remaining transparent, configurable, and production-ready.
+Unlike many automated machine learning tools, **PreML** does not rely on opaque heuristics. Every recommendation is derived from statistical evidence, enabling reproducible, explainable, and trustworthy machine learning workflows.
 
 ---
 
-## Table of Contents
+# Table of Contents
 
 - [Introduction](#introduction)
 - [Requirements](#requirements)
@@ -14,14 +14,6 @@ It generates evidence-based recommendations and builds `scikit-learn`-compatible
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Core Components](#core-components)
-  - [EDAAnalyzer](#edaanalyzer)
-  - [StatisticsEngine](#statisticsengine)
-  - [RecommendationEngine](#recommendationengine)
-  - [Visualization](#visualization)
-  - [PreprocessingBuilder](#preprocessingbuilder)
-  - [FeatureEngineering](#featureengineering)
-  - [BaselineTrainer](#baselinetrainer)
-  - [ReportGenerator](#reportgenerator)
 - [End-to-End Workflow](#end-to-end-workflow)
 - [Performance](#performance)
 - [Thread Safety](#thread-safety)
@@ -29,7 +21,6 @@ It generates evidence-based recommendations and builds `scikit-learn`-compatible
 - [Best Practices](#best-practices)
 - [Common Pitfalls](#common-pitfalls)
 - [FAQ](#faq)
-- [Component Relationships](#component-relationships)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
 - [License](#license)
@@ -39,25 +30,36 @@ It generates evidence-based recommendations and builds `scikit-learn`-compatible
 
 # Introduction
 
-**PreML** automates the repetitive, data-driven stages of traditional machine learning workflows.
+Machine learning projects often spend significantly more time on data preparation than on model development. PreML streamlines this process by automating statistical analysis and generating evidence-based preprocessing recommendations while keeping every decision transparent and interpretable.
 
-The library combines statistical analysis, intelligent preprocessing recommendations, feature engineering suggestions, visualization, baseline model evaluation, and professional report generation into a unified workflow.
+The library integrates multiple stages of a traditional machine learning workflow into a unified API:
 
-Every recommendation is generated from statistical evidence rather than hard-coded assumptions, ensuring transparency and interpretability throughout the analysis process.
+- Exploratory Data Analysis (EDA)
+- Statistical profiling
+- Data quality assessment
+- Preprocessing pipeline generation
+- Feature engineering recommendations
+- Baseline model training
+- Visualization
+- Professional report generation
+
+Every recommendation is produced from measurable statistical evidence rather than hard-coded assumptions, making workflows reproducible and suitable for both research and production environments.
 
 ---
 
 # Requirements
 
-PreML requires the following software and dependencies.
+PreML supports modern Python versions and is built on widely adopted scientific computing libraries.
 
-- Python 3.10+
-- pandas
-- NumPy
-- scikit-learn
-- matplotlib
-- seaborn *(used for visualization)*
-- scipy *(used for statistical methods)*
+| Requirement | Version |
+|------------|---------|
+| Python | 3.10+ |
+| pandas | Latest Stable |
+| NumPy | Latest Stable |
+| scikit-learn | Latest Stable |
+| matplotlib | Latest Stable |
+| seaborn | Latest Stable |
+| SciPy | Latest Stable |
 
 ---
 
@@ -65,122 +67,180 @@ PreML requires the following software and dependencies.
 
 ## Install from PyPI
 
+Install the latest stable release directly from PyPI.
+
 ```bash
+# Install the latest stable version of PreML
 pip install preml
 ```
 
+---
+
 ## Install from Source
 
-Clone the repository and install it in editable mode.
+Clone the repository and install it in editable mode if you plan to contribute or modify the library.
 
 ```bash
+# Clone the GitHub repository
 git clone https://github.com/alinazer30/preml.git
 
+# Navigate into the project directory
 cd preml
 
+# Install the package in editable mode
 pip install -e .
 ```
+
+> **Note**
+>
+> Installing in editable mode (`-e`) allows any source code modifications to become immediately available without reinstalling the package.
 
 ---
 
 # Quick Start
 
-The following example demonstrates a minimal end-to-end workflow.
+The following example demonstrates a minimal end-to-end workflow using PreML.
 
 ```python
 import pandas as pd
 
-from preml.eda import EDAAnalyzer
+# Import the high-level EDA helper
+from preml import quick_eda
+
+# Import the preprocessing pipeline builder
 from preml.preprocessing import PreprocessingBuilder
 
+# Load your dataset
 df = pd.read_csv("housing.csv")
 
-analysis = EDAAnalyzer(
+# Run exploratory data analysis
+# This returns a dictionary containing statistics,
+# recommendations, feature profiles, and metadata.
+analysis = quick_eda(
     df,
     target="SalePrice",
-).run()
+)
 
+# Build a preprocessing pipeline based on
+# the statistical analysis results.
 builder = PreprocessingBuilder(analysis)
 
 pipeline = builder.build_pipeline()
 
-feature_cols = [
-    p.column
-    for p in analysis["feature_profiles"]
+# Collect feature columns while excluding the target.
+feature_columns = [
+    profile.column
+    for profile in analysis["feature_profiles"]
 ]
 
-X_transformed, = builder.fit_transform(
-    df[feature_cols]
+# Fit the preprocessing pipeline and transform
+# the dataset into a machine-learning-ready feature matrix.
+X_transformed = builder.fit_transform(
+    df[feature_columns]
 )
 ```
 
+After these steps:
+
+- The dataset has been analyzed.
+- Statistical recommendations have been generated.
+- A production-ready preprocessing pipeline has been created.
+- The feature matrix has been transformed into a NumPy array compatible with Scikit-learn estimators.
+
 > **Tip**
 >
-> For a complete machine learning workflow including feature engineering, baseline model evaluation, and report generation, see the **End-to-End Workflow** section.
+> For a complete workflow including feature engineering, baseline model evaluation, visualization, and report generation, continue to the **End-to-End Workflow** section.
 
 ---
 
 # Configuration
 
-All configurable thresholds and runtime settings are managed through `MLToolkitConfig`.
+All configurable thresholds and runtime behavior are managed through the `MLToolkitConfig` class.
 
-Whenever a configuration parameter is omitted, the toolkit automatically falls back to safe default values.
-
-This ensures stable behavior while allowing advanced users to customize every stage of the workflow.
+Whenever a configuration parameter is omitted, PreML automatically falls back to safe and well-tested default values. This allows beginners to get started immediately while giving advanced users complete control over the analysis pipeline.
 
 ---
 
-## Create a Custom Configuration
+## Creating a Custom Configuration
 
 ```python
+# Import the configuration class
 from preml.config import MLToolkitConfig
 
+# Create a reusable configuration object
 config = MLToolkitConfig(
+
+    # Maximum acceptable missing-value ratio
     missing_threshold=0.30,
+
+    # Absolute correlation threshold
     correlation_threshold=0.85,
+
+    # Threshold for recommending power transformations
     skewness_threshold=1.0,
-    outlier_method="iqr",      # "iqr" or "zscore"
+
+    # Outlier detection algorithm
+    # Supported values:
+    #   "iqr"
+    #   "zscore"
+    outlier_method="iqr",
+
+    # Random seed for reproducible workflows
     random_state=42,
+
+    # Maximum number of columns shown in plots
     max_plot_cols=12,
+
+    # Default Matplotlib figure size
     figure_size=(12, 8),
+
+    # Global plotting style
     plot_style="whitegrid",
+
+    # Default visualization palette
     color_palette="muted",
 )
 ```
 
-### Configuration Parameters
+---
+
+## Configuration Parameters
 
 | Parameter | Description |
 |-----------|-------------|
-| `missing_threshold` | Missing-value threshold used when generating recommendations. |
-| `correlation_threshold` | Minimum absolute correlation considered significant. |
-| `skewness_threshold` | Threshold used when recommending feature transformations. |
+| `missing_threshold` | Missing-value threshold used for generating imputation recommendations. |
+| `correlation_threshold` | Minimum absolute correlation considered statistically significant. |
+| `skewness_threshold` | Threshold for recommending feature transformations. |
 | `outlier_method` | Outlier detection algorithm (`iqr` or `zscore`). |
-| `random_state` | Random seed used for reproducible workflows. |
-| `max_plot_cols` | Maximum number of columns displayed in generated visualizations. |
-| `figure_size` | Default figure size used by visualization functions. |
+| `random_state` | Random seed used for reproducible experiments. |
+| `max_plot_cols` | Maximum number of columns included in generated visualizations. |
+| `figure_size` | Default figure size used by plotting functions. |
 | `plot_style` | Global Matplotlib plotting style. |
 | `color_palette` | Default visualization color palette. |
 
 ---
 
-## Use the Default Configuration
+## Using the Default Configuration
 
 ```python
+# Import the default configuration
 from preml.config import default_config
 
+# Reuse the library's default settings
 config = default_config
 ```
 
 ---
 
-## Pass the Configuration to Components
+## Passing Configuration to Components
 
-Every component that supports configuration accepts the same `MLToolkitConfig` instance.
+Every configurable component accepts the same `MLToolkitConfig` instance.
 
 ```python
+# Import the main EDA component
 from preml.eda import EDAAnalyzer
 
+# Initialize the analyzer with a shared configuration
 analyzer = EDAAnalyzer(
     df,
     target="target",
@@ -190,266 +250,895 @@ analyzer = EDAAnalyzer(
 
 > **Best Practice**
 >
-> Create a single configuration instance and reuse it across the entire workflow to ensure consistent thresholds, preprocessing behavior, visualization settings, and model recommendations.
+> Create a single configuration instance and reuse it across your entire workflow. This ensures consistent preprocessing behavior, statistical thresholds, visualization settings, and model recommendations.
 
 ---
 
 # Core Components
 
-## EDAAnalyzer
+PreML is organized into modular components that can be used independently or combined into a complete machine learning workflow.
 
-### Overview
+Each component has a well-defined responsibility and communicates through standardized data structures, making the library easy to extend, test, and integrate into existing projects.
 
-`EDAAnalyzer` is the central component of PreML.
+The typical workflow is illustrated below:
 
-It orchestrates the complete exploratory data analysis (EDA) workflow by combining statistical analysis, recommendation generation, and data quality assessment into a single interface.
+```text
+                Dataset
+                    │
+                    ▼
+             EDAAnalyzer
+                    │
+     ┌──────────────┼──────────────┐
+     ▼              ▼              ▼
+Statistics   Recommendations   Data Quality
+     │              │
+     └──────────────┘
+             │
+             ▼
+   PreprocessingBuilder
+             │
+             ▼
+   FeatureEngineering
+             │
+             ▼
+    BaselineTrainer
+             │
+             ▼
+    ReportGenerator
+```
 
 ---
 
-### Highlights
+# EDAAnalyzer
+
+## Overview
+
+`EDAAnalyzer` is the primary entry point of PreML.
+
+It orchestrates the complete exploratory data analysis (EDA) workflow by combining statistical analysis, data quality assessment, feature profiling, and evidence-based recommendation generation into a single interface.
+
+Rather than exposing multiple independent analysis steps, `EDAAnalyzer` executes them in a consistent order and aggregates the results into a unified analysis object that can be consumed by every other component in the library.
+
+Because every downstream component relies on the same analysis dictionary, statistics are computed only once and reused throughout the workflow.
+
+---
+
+## Responsibilities
+
+`EDAAnalyzer` automatically performs the following tasks:
 
 - Computes dataset metadata.
-- Detects missing values, duplicates, and infinite values.
-- Identifies outliers using configurable detection methods.
-- Profiles numerical and categorical features.
+- Detects duplicate rows.
+- Detects missing values.
+- Detects infinite values.
+- Detects numerical outliers using configurable methods.
+- Profiles numerical features.
+- Profiles categorical features.
+- Analyzes the target variable.
 - Computes feature correlations.
-- Profiles the target variable.
-- Generates evidence-based preprocessing recommendations.
-- Calculates an overall data quality score with explanatory notes.
+- Generates preprocessing recommendations.
+- Calculates an overall data quality score.
+- Produces human-readable data quality notes.
 
 ---
 
-### Example
+## Basic Example
 
 ```python
+# Import the analyzer
 from preml.eda import EDAAnalyzer
 
+# Create the analyzer
 analyzer = EDAAnalyzer(
+
+    # Input dataset
     df,
+
+    # Optional target column
     target="price",
 )
 
+# Execute the complete analysis pipeline
 analysis = analyzer.run()
 ```
 
-**Returned Object**
+After calling `run()`, all statistical analyses are completed and stored inside a single dictionary that can be reused throughout the rest of the workflow.
+
+---
+
+## Returned Object
+
+The analyzer returns a dictionary containing all generated analysis results.
 
 ```python
 analysis: dict[str, Any]
 ```
 
-Available keys include:
+The most commonly used keys include:
 
-```text
-metadata
-duplicates
-infinite
-missing
-outliers
-feature_profiles
-correlation_pairs
-target_profile
-recommendations
-data_quality_score
-data_quality_notes
-```
+| Key | Description |
+|------|-------------|
+| `metadata` | General dataset information. |
+| `duplicates` | Duplicate row analysis. |
+| `infinite` | Infinite value report. |
+| `missing` | Missing-value statistics. |
+| `outliers` | Outlier detection results. |
+| `feature_profiles` | Numerical and categorical feature profiles. |
+| `correlation_pairs` | Significant feature correlations. |
+| `target_profile` | Target variable analysis. |
+| `recommendations` | Evidence-based preprocessing recommendations. |
+| `data_quality_score` | Overall dataset quality score. |
+| `data_quality_notes` | Human-readable quality assessment. |
 
 ---
 
-### Generate a Summary
+## Accessing Individual Results
+
+Since the analysis output is a standard Python dictionary, individual reports can be accessed directly.
 
 ```python
-print(analyzer.summary())
+# Retrieve dataset metadata
+metadata = analysis["metadata"]
+
+# Retrieve missing-value statistics
+missing = analysis["missing"]
+
+# Retrieve detected outliers
+outliers = analysis["outliers"]
+
+# Retrieve preprocessing recommendations
+recommendations = analysis["recommendations"]
+
+# Retrieve the overall quality score
+quality_score = analysis["data_quality_score"]
 ```
 
-The summary provides a concise overview of the dataset, highlighting important quality issues and preprocessing recommendations.
+This design keeps the API intuitive while allowing each downstream component to reuse existing statistical results without recomputation.
 
 ---
 
-### Notes
+## Generating a Summary
 
-- The `target` parameter is optional.
-- When no target is provided, all target-dependent analyses are skipped automatically.
-- Statistical outputs are represented by strongly typed dataclasses.
-
----
-
-## StatisticsEngine
-
-### Overview
-
-`StatisticsEngine` provides the statistical foundation for the toolkit.
-
-Unlike `EDAAnalyzer`, it performs descriptive analysis only and does not generate preprocessing recommendations or quality scores.
-
-It is intended for workflows that require statistical facts without higher-level interpretation.
-
----
-
-### Highlights
-
-- Computes dataset statistics.
-- Provides independent methods for each analysis stage.
-- Returns strongly typed dataclasses.
-- Uses vectorized computations for improved performance.
-- Designed to be lightweight and reusable.
-
----
-
-### Example
+A concise textual summary can be generated at any time.
 
 ```python
+# Print a human-readable summary
+print(
+    analyzer.summary()
+)
+```
+
+The generated summary typically includes:
+
+- Dataset dimensions.
+- Missing-value overview.
+- Duplicate statistics.
+- Outlier summary.
+- Correlation highlights.
+- Data quality score.
+- Important preprocessing recommendations.
+
+This summary is particularly useful for:
+
+- Interactive notebooks.
+- Command-line workflows.
+- Logging.
+- Quick dataset inspection.
+
+---
+
+## Working Without a Target Column
+
+The `target` parameter is optional.
+
+```python
+# Perform unsupervised dataset analysis
+analyzer = EDAAnalyzer(df)
+
+analysis = analyzer.run()
+```
+
+When no target column is provided:
+
+- Target profiling is skipped.
+- Target correlations are omitted.
+- Model recommendations are not generated.
+- All other analyses continue normally.
+
+This makes `EDAAnalyzer` suitable for both supervised and unsupervised workflows.
+
+---
+
+## Performance Characteristics
+
+`EDAAnalyzer` is designed to minimize redundant computation.
+
+Key optimizations include:
+
+- Statistics are computed exactly once.
+- Intermediate results are reused internally.
+- Vectorized NumPy and pandas operations are preferred whenever possible.
+- Downstream components consume the existing analysis dictionary instead of recalculating statistics.
+
+This approach significantly reduces execution time in larger machine learning workflows.
+
+---
+
+## Best Practices
+
+- Run `EDAAnalyzer` only once per dataset.
+- Reuse the returned `analysis` dictionary throughout the workflow.
+- Share the same `MLToolkitConfig` instance across all components.
+- Preserve the returned analysis object for report generation and visualization.
+- Avoid modifying the analysis dictionary unless you understand the downstream implications.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `EDAAnalyzer` does **not** modify the original DataFrame.
+
+> **Note**
+>
+> Statistical outputs are represented using strongly typed dataclasses wherever possible to improve readability, maintainability, and IDE support.
+
+> **Note**
+>
+> If you only require descriptive statistics without preprocessing recommendations or data quality scoring, consider using `StatisticsEngine` instead. It provides a lighter-weight interface dedicated exclusively to statistical analysis.
+
+# StatisticsEngine
+
+## Overview
+
+`StatisticsEngine` is the statistical core of PreML.
+
+It provides a lightweight interface for computing descriptive statistics and data quality metrics without generating preprocessing recommendations or quality scores.
+
+Unlike `EDAAnalyzer`, which orchestrates the complete exploratory data analysis workflow, `StatisticsEngine` focuses exclusively on statistical computation. This makes it an excellent choice for applications that require reliable statistical outputs while implementing custom preprocessing or decision-making logic.
+
+All analyses are deterministic and are designed to produce reproducible results given the same input data and configuration.
+
+---
+
+## When to Use StatisticsEngine
+
+Use `StatisticsEngine` when you need to:
+
+- Compute descriptive statistics.
+- Analyze missing values.
+- Detect duplicate rows.
+- Detect infinite values.
+- Identify numerical outliers.
+- Profile numerical and categorical features.
+- Analyze the target variable.
+- Compute feature correlations.
+- Build your own recommendation engine.
+- Integrate PreML into an existing analytics pipeline.
+
+If your workflow also requires preprocessing recommendations, quality scoring, or automatic workflow orchestration, use `EDAAnalyzer` instead.
+
+---
+
+## Responsibilities
+
+`StatisticsEngine` performs the following analyses:
+
+- Dataset metadata generation.
+- Duplicate detection.
+- Missing-value analysis.
+- Infinite-value detection.
+- Numerical outlier detection.
+- Numerical feature profiling.
+- Categorical feature profiling.
+- Target variable profiling.
+- Correlation analysis.
+- Full statistical analysis execution.
+
+Unlike higher-level components, every analysis method can also be executed independently.
+
+---
+
+## Basic Example
+
+```python
+# Import the statistics engine
 from preml.statistics_engine import StatisticsEngine
 
+# Create the engine
 engine = StatisticsEngine(
+
+    # Input dataset
     df,
+
+    # Optional target column
     target="price",
 )
 
+# Run every available statistical analysis
 stats = engine.run_full_analysis()
 ```
 
-**Returned Object**
+After execution, the `stats` dictionary contains every computed statistical report that can later be consumed by other components.
+
+---
+
+## Returned Object
+
+The engine returns a standard Python dictionary.
 
 ```python
 stats: dict[str, Any]
 ```
 
-The returned dictionary contains the same statistical outputs as `EDAAnalyzer`, excluding recommendations and quality metrics.
+The dictionary typically contains:
+
+| Key | Description |
+|------|-------------|
+| `metadata` | Dataset information and dimensions. |
+| `duplicates` | Duplicate row analysis. |
+| `missing` | Missing-value report. |
+| `infinite` | Infinite-value report. |
+| `outliers` | Numerical outlier analysis. |
+| `feature_profiles` | Numerical and categorical feature profiles. |
+| `correlation_pairs` | Significant feature correlations. |
+| `target_profile` | Target variable analysis (if available). |
+
+Unlike `EDAAnalyzer`, the returned dictionary does **not** contain:
+
+- Recommendations
+- Data quality score
+- Data quality notes
 
 ---
 
-### Access Individual Reports
+## Running Individual Analyses
+
+Each statistical report can be generated independently.
+
+### Dataset Metadata
 
 ```python
+# Compute general dataset information
+metadata = engine.compute_dataset_metadata()
+```
+
+---
+
+### Duplicate Analysis
+
+```python
+# Detect duplicated rows
+duplicates = engine.compute_duplicate_report()
+```
+
+---
+
+### Missing-Value Analysis
+
+```python
+# Analyze missing values
+missing = engine.compute_missing_report()
+```
+
+---
+
+### Infinite-Value Analysis
+
+```python
+# Detect positive and negative infinity values
+infinite = engine.compute_infinite_report()
+```
+
+---
+
+### Outlier Detection
+
+```python
+# Detect numerical outliers
+outliers = engine.compute_outlier_report()
+```
+
+---
+
+### Feature Profiling
+
+```python
+# Generate numerical and categorical feature profiles
+profiles = engine.compute_feature_profiles()
+```
+
+---
+
+### Correlation Analysis
+
+```python
+# Compute statistically significant feature correlations
+correlations = engine.compute_correlation_pairs()
+```
+
+---
+
+### Target Analysis
+
+```python
+# Analyze the target column
+target = engine.compute_target_profile()
+```
+
+---
+
+## Running the Complete Analysis
+
+To compute every available report in one call:
+
+```python
+# Execute every statistical analysis
+stats = engine.run_full_analysis()
+```
+
+This is equivalent to calling every individual analysis method sequentially.
+
+---
+
+## Inspecting Missing Values
+
+The missing-value report exposes dataset-level statistics together with per-column details.
+
+```python
+# Compute missing-value statistics
 missing = engine.compute_missing_report()
 
-print(missing.total_missing)
+# Total number of missing values
+print(
+    missing.total_missing
+)
 ```
 
-Example:
+---
+
+### Inspecting Individual Columns
 
 ```python
+# Iterate over every column report
 for report in missing.column_reports:
-    print(
-        report.column,
-        report.missing_percent,
-    )
+
+    # Print the column name
+    print(report.column)
+
+    # Print the percentage of missing values
+    print(report.missing_percent)
+
+    # Print the number of missing entries
+    print(report.missing_count)
+```
+
+This allows applications to build custom dashboards, reports, or preprocessing logic without recomputing statistics.
+
+---
+
+## Accessing Feature Profiles
+
+Feature profiles contain descriptive statistics for every feature.
+
+```python
+# Compute feature profiles
+profiles = engine.compute_feature_profiles()
+
+# Iterate over every feature
+for profile in profiles:
+
+    # Feature name
+    print(profile.column)
+
+    # Feature type
+    print(profile.data_type)
+
+    # Missing-value percentage
+    print(profile.missing_percent)
+```
+
+The available fields depend on whether the feature is numerical or categorical.
+
+---
+
+## Accessing Correlations
+
+```python
+# Compute correlations
+correlations = engine.compute_correlation_pairs()
+
+# Iterate through every significant correlation
+for pair in correlations:
+
+    print(pair.feature_x)
+    print(pair.feature_y)
+    print(pair.correlation)
+```
+
+Only statistically meaningful correlation pairs are returned.
+
+---
+
+## Working Without a Target Variable
+
+Target analysis is optional.
+
+```python
+# Analyze an unlabeled dataset
+engine = StatisticsEngine(df)
+
+stats = engine.run_full_analysis()
+```
+
+When no target is supplied:
+
+- Target profiling is skipped.
+- Target correlations are omitted.
+- Remaining analyses continue normally.
+
+---
+
+## Performance Characteristics
+
+`StatisticsEngine` is optimized for analytical workloads.
+
+Performance optimizations include:
+
+- Vectorized NumPy operations.
+- Vectorized pandas operations.
+- Minimal intermediate allocations.
+- Efficient percentile calculations.
+- Reuse of internal helper methods.
+- No unnecessary object creation.
+- Deterministic execution.
+
+The engine is intended to scale efficiently across medium and large tabular datasets.
+
+---
+
+## Memory Behavior
+
+During initialization, the input DataFrame is copied.
+
+This protects the original dataset from accidental modification during statistical analysis.
+
+For extremely large datasets, consider:
+
+- Sampling before analysis.
+- Removing unused columns.
+- Using appropriate numerical data types.
+
+These practices can significantly reduce memory usage.
+
+---
+
+## Best Practices
+
+- Execute `run_full_analysis()` whenever multiple reports are required.
+- Reuse the returned statistics instead of recomputing them.
+- Sample very large datasets when exploratory analysis is sufficient.
+- Keep the original DataFrame unchanged throughout the workflow.
+- Use a shared configuration object across components.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `StatisticsEngine` performs descriptive statistical analysis only. It never generates preprocessing recommendations.
+
+> **Note**
+>
+> Every statistical report is represented using strongly typed dataclasses whenever possible.
+
+> **Note**
+>
+> All computations are deterministic and contain no random operations.
+
+> **Note**
+>
+> If your workflow requires recommendation generation, preprocessing guidance, or data quality scoring, use `EDAAnalyzer`, which builds upon the statistical outputs produced by `StatisticsEngine`.
+
+# RecommendationEngine
+
+## Overview
+
+`RecommendationEngine` transforms statistical analysis into actionable machine learning recommendations.
+
+Unlike `StatisticsEngine`, it performs **no statistical computation**, and unlike `EDAAnalyzer`, it does **not analyze raw datasets**. Instead, it interprets the statistical outputs generated by previous analysis stages and produces transparent, evidence-based recommendations for preprocessing, feature engineering, feature selection, and baseline model selection.
+
+This separation of responsibilities keeps the recommendation layer deterministic, reusable, and easy to customize.
+
+Every recommendation is derived entirely from statistical evidence contained within the supplied analysis dictionary.
+
+---
+
+## Design Philosophy
+
+The recommendation engine follows a simple principle:
+
+> **Statistics describe the data; recommendations interpret the statistics.**
+
+Because of this separation:
+
+- Statistical analysis is executed only once.
+- Recommendations remain reproducible.
+- Recommendation logic can evolve independently from statistical computation.
+- Users can inspect the evidence behind every recommendation.
+
+---
+
+## Responsibilities
+
+`RecommendationEngine` is responsible for generating recommendations related to:
+
+- Missing-value handling.
+- Outlier treatment.
+- Feature transformations.
+- Numerical scaling.
+- Categorical encoding.
+- Feature engineering.
+- Feature selection.
+- Baseline model selection.
+- Data quality observations.
+
+It never modifies the dataset or preprocessing pipeline directly.
+
+---
+
+## Workflow
+
+The recommendation engine operates on a completed analysis object.
+
+```text
+Dataset
+    │
+    ▼
+StatisticsEngine / EDAAnalyzer
+    │
+    ▼
+Analysis Dictionary
+    │
+    ▼
+RecommendationEngine
+    │
+    ▼
+Evidence-Based Recommendations
 ```
 
 ---
 
-### Available Analysis Methods
+## Basic Example
 
 ```python
-engine.compute_dataset_metadata()
-
-engine.compute_duplicate_report()
-
-engine.compute_infinite_report()
-
-engine.compute_missing_report()
-
-engine.compute_outlier_report()
-
-engine.compute_feature_profiles()
-
-engine.compute_correlation_pairs()
-
-engine.compute_target_profile()
-
-engine.run_full_analysis()
-```
-
----
-
-### Notes
-
-- The input DataFrame is copied during initialization to preserve the original dataset.
-- For very large datasets, sampling before analysis is recommended.
-- Use `EDAAnalyzer` whenever preprocessing recommendations or quality scoring are also required.
-
----
-
-## RecommendationEngine
-
-### Overview
-
-`RecommendationEngine` converts statistical evidence into actionable machine learning recommendations.
-
-It never recomputes statistics. Instead, it interprets the outputs generated by `EDAAnalyzer` or `StatisticsEngine`.
-
----
-
-### Highlights
-
-- Configurable decision thresholds.
-- Missing-value recommendations.
-- Outlier handling recommendations.
-- Feature transformation suggestions.
-- Scaling recommendations.
-- Encoding recommendations.
-- Feature engineering suggestions.
-- Feature selection suggestions.
-- Ranked baseline model recommendations.
-
----
-
-### Example
-
-```python
+# Import the recommendation engine
 from preml.recommendation_engine import RecommendationEngine
 
+# Create the recommendation engine
 engine = RecommendationEngine(
+
+    # Optional shared configuration
     config=config,
 )
 
+# Generate recommendations from a completed analysis
 recommendations = engine.generate_recommendations(
     analysis,
 )
 ```
 
-**Returned Object**
+The returned recommendations can be consumed by preprocessing components, reports, notebooks, or custom applications.
+
+---
+
+## Returned Object
+
+The recommendation engine returns a standard Python dictionary.
 
 ```python
 recommendations: dict[str, Any]
 ```
 
-Available categories include:
+Common categories include:
 
-```text
-imputation
-outlier_handling
-transformation
-scaling
-encoding
-feature_engineering
-feature_selection
-models
-data_quality_notes
-```
+| Key | Description |
+|------|-------------|
+| `imputation` | Missing-value handling recommendations. |
+| `outlier_handling` | Suggested outlier treatment strategy. |
+| `transformation` | Recommended feature transformations. |
+| `scaling` | Numerical scaling recommendations. |
+| `encoding` | Suggested categorical encoding strategy. |
+| `feature_engineering` | Feature engineering opportunities. |
+| `feature_selection` | Candidate features for removal or retention. |
+| `models` | Ranked baseline model recommendations. |
+| `data_quality_notes` | Human-readable observations about dataset quality. |
+
+Each category contains structured recommendation objects rather than plain text, making them suitable for both programmatic use and report generation.
 
 ---
 
-### Scaling Recommendation
+## Generating Recommendations
 
 ```python
-print(
-    recommendations["scaling"].action
+# Generate recommendations
+recommendations = engine.generate_recommendations(
+    analysis
 )
 ```
 
+The supplied analysis dictionary must contain the statistical reports required by the recommendation engine.
+
+No additional statistical analysis is performed.
+
 ---
 
-### Recommended Models
+## Missing-Value Recommendations
+
+Retrieve recommendations related to missing data.
 
 ```python
-for model in recommendations["models"]:
+# Iterate through imputation recommendations
+for recommendation in recommendations["imputation"]:
+
+    # Suggested action
+    print(recommendation.action)
+
+    # Confidence score
+    print(recommendation.confidence)
+
+    # Supporting statistical evidence
+    if recommendation.evidence:
+        print(
+            recommendation.evidence[0].reason
+        )
+```
+Typical recommendations may include:
+
+- Mean imputation.
+- Median imputation.
+- Most-frequent imputation.
+- Constant-value imputation.
+- Removing highly incomplete features.
+
+The selected strategy depends entirely on the statistical characteristics of each feature.
+
+---
+
+## Scaling Recommendations
+
+Retrieve the recommended scaling strategy.
+
+```python
+# Access scaling recommendations
+# Retrieve the scaling recommendation
+scaling = recommendations["scaling"]
+
+# Suggested preprocessing action
+print(scaling.action)
+
+# Supporting statistical evidence
+if scaling.evidence:
     print(
-        f"{model.model_name:<30}"
-        f"{model.suitability:<12}"
-        f"{model.reason}"
+        scaling.evidence[0].reason
     )
+```
+
+Possible recommendations include:
+
+- No scaling required.
+- StandardScaler.
+- RobustScaler.
+- MinMaxScaler.
+
+The chosen recommendation depends on feature distributions, skewness, and detected outliers.
+
+---
+
+## Encoding Recommendations
+
+Categorical encoding recommendations can be inspected in the same way.
+
+```python
+# Iterate through encoding recommendations
+for recommendation in recommendations["encoding"]:
+
+    # Suggested encoding strategy
+    print(recommendation.action)
+
+    # Supporting statistical evidence
+    if recommendation.evidence:
+        print(
+            recommendation.evidence[0].reason
+        )
+```
+
+Depending on the data, the engine may recommend:
+
+- One-hot encoding.
+- Ordinal encoding.
+- Leaving the feature unchanged.
+
+Recommendations are based on feature cardinality and statistical properties.
+
+---
+
+## Feature Engineering Suggestions
+
+Feature engineering recommendations are generated from statistical evidence.
+
+```python
+# Display feature engineering recommendations
+for recommendation in recommendations["feature_engineering"]:
+
+    # Suggested feature engineering action
+    print(recommendation.action)
+
+    # Confidence score
+    print(recommendation.confidence)
+
+    # Supporting statistical evidence
+    for evidence in recommendation.evidence:
+        print(evidence.reason)
+```
+
+Examples include:
+
+- Power transformations.
+- Ratio features.
+- Interaction features.
+- Datetime decomposition.
+- Numerical binning.
+
+These recommendations should be treated as hypotheses that require validation.
+
+---
+
+## Feature Selection Recommendations
+
+Recommendations for removing or retaining features are also available.
+
+```python
+# Display feature-selection recommendations
+for recommendation in recommendations["feature_selection"]:
+
+    # Suggested action
+    print(recommendation.action)
+
+    # Supporting statistical evidence
+    if recommendation.evidence:
+        print(
+            recommendation.evidence[0].reason
+        )
+```
+
+Recommendations may include:
+
+- Removing constant features.
+- Removing quasi-constant features.
+- Removing highly correlated features.
+- Retaining informative variables.
+
+---
+
+## Baseline Model Recommendations
+
+The recommendation engine ranks candidate machine learning models according to the analyzed dataset.
+
+```python
+# Iterate through recommended baseline models
+for model in recommendations["models"]:
+
+    # Model name
+    print(model.model_name)
+
+    # Suitability rating
+    print(model.suitability)
+
+    # Supporting explanation
+    print(model.reason)
 ```
 
 Example output:
@@ -457,60 +1146,155 @@ Example output:
 ```text
 RandomForestClassifier      Excellent
 XGBoostClassifier           Excellent
-LogisticRegression          Baseline
+LogisticRegression          Good Baseline
 ```
+
+These rankings are intended to accelerate baseline experimentation rather than replace model validation.
 
 ---
 
-### Generate a Formatted Summary
+## Generating a Human-Readable Summary
+
+A formatted summary can be generated for reports or console output.
 
 ```python
-print(
-    RecommendationEngine.summarize(
-        recommendations
-    )
+# Generate a formatted recommendation summary
+summary = RecommendationEngine.summarize(
+    recommendations
 )
+
+# Print the formatted output
+print(summary)
 ```
 
 The generated summary is suitable for:
 
-- Console output
-- Markdown reports
-- HTML reports
-- Plain-text documentation
-- Logging
+- Console output.
+- Markdown reports.
+- HTML reports.
+- Plain-text reports.
+- Logging.
+- Experiment documentation.
 
 ---
 
-### Notes
+## Error Handling
 
-- Statistics are never recomputed.
-- Recommendations are generated entirely from the supplied analysis results.
-- Missing required analysis keys raise a `RecommendationError`.
+The recommendation engine validates the supplied analysis dictionary before generating recommendations.
 
-## Visualization
-
-### Overview
-
-The visualization module generates publication-ready figures directly from precomputed analysis results.
-
-Unlike traditional plotting utilities, visualization functions never perform statistical analysis internally. They reuse the analysis dictionary produced by `EDAAnalyzer`, ensuring consistency while avoiding unnecessary computation.
-
----
-
-### Highlights
-
-- Lightweight and efficient.
-- No statistical recomputation.
-- Returns standard Matplotlib figures.
-- Supports automatic explanatory captions.
-- Integrates seamlessly with `ReportGenerator`.
-
----
-
-### Importing Visualization Functions
+If mandatory statistical information is missing, an exception is raised.
 
 ```python
+try:
+
+    # Generate recommendations
+    recommendations = engine.generate_recommendations(
+        analysis
+    )
+
+except RecommendationError as error:
+
+    # Display the error message
+    print(error)
+```
+
+This validation prevents incomplete or inconsistent recommendations.
+
+---
+
+## Performance Characteristics
+
+`RecommendationEngine` is computationally lightweight.
+
+Because all statistical analysis has already been completed:
+
+- No dataset traversal is required.
+- No numerical computations are repeated.
+- Existing analysis results are reused.
+- Recommendation generation is typically fast, even for large datasets.
+
+Its execution time depends primarily on the complexity of the recommendation rules rather than the size of the original dataset.
+
+---
+
+## Best Practices
+
+- Generate recommendations from a completed analysis object.
+- Reuse the same analysis dictionary throughout the workflow.
+- Inspect recommendation reasons before applying preprocessing automatically.
+- Validate feature engineering suggestions using cross-validation.
+- Compare multiple baseline models before selecting a production model.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `RecommendationEngine` never performs statistical analysis.
+
+> **Note**
+>
+> Every recommendation is derived exclusively from the supplied analysis dictionary.
+
+> **Note**
+>
+> Recommendations are deterministic and reproducible when generated from identical statistical inputs.
+
+> **Note**
+>
+> Missing required analysis keys result in a `RecommendationError` to prevent incomplete recommendation generation.
+
+> **Note**
+>
+> The recommendation engine does not modify datasets, preprocessing pipelines, or machine learning models. It only produces structured recommendations that can be consumed by other components.
+
+# Visualization
+
+## Overview
+
+The `preml.visualization` module provides publication-quality visualizations that are generated directly from an existing analysis object.
+
+Unlike traditional plotting utilities, visualization functions never perform statistical analysis internally. Instead, they consume the analysis dictionary produced by `EDAAnalyzer` or `StatisticsEngine`, ensuring that every figure remains consistent with the computed statistics while avoiding redundant computation.
+
+This design improves performance, guarantees reproducibility, and keeps visualization separate from statistical analysis.
+
+---
+
+## Key Features
+
+- Generates publication-ready figures.
+- Reuses previously computed statistics.
+- Never recomputes analysis internally.
+- Fully compatible with Matplotlib.
+- Supports configurable styling.
+- Integrates seamlessly with `ReportGenerator`.
+- Generates explanatory captions for every visualization.
+- Returns standard Matplotlib `Figure` objects.
+
+---
+
+## Supported Visualizations
+
+The visualization module currently provides the following functions.
+
+| Function | Description |
+|----------|-------------|
+| `plot_numeric_distributions()` | Visualize numerical feature distributions. |
+| `plot_missing_heatmap()` | Display missing-value patterns. |
+| `plot_correlation_heatmap()` | Display significant feature correlations. |
+| `plot_outlier_summary()` | Summarize detected outliers. |
+| `plot_target_distribution()` | Visualize the target distribution. |
+| `plot_target_correlations()` | Display correlations with the target variable. |
+| `plot_top_correlations_bar()` | Display the strongest feature correlations. |
+| `explain_visualizations()` | Generate explanatory captions for plots. |
+
+---
+
+## Importing Visualization Functions
+
+```python
+# Import visualization utilities
 from preml.visualization import (
     plot_numeric_distributions,
     plot_missing_heatmap,
@@ -525,22 +1309,60 @@ from preml.visualization import (
 
 ---
 
-### Numeric Feature Distributions
+# Numeric Feature Distributions
 
 Visualize the distribution of numerical features using combined histograms and box plots.
 
+## Example
+
 ```python
+# Generate the figure
 fig = plot_numeric_distributions(
+
+    # Original dataset
     df,
+
+    # Previously generated analysis
     analysis,
+
+    # Maximum number of displayed columns
     max_cols=8,
 )
 
-if fig:
-    fig.savefig("distributions.png")
+# Save the figure if one was created
+if fig is not None:
+    fig.savefig("numeric_distributions.png")
 ```
 
-**Returns**
+### Returns
+
+```python
+matplotlib.figure.Figure | None
+```
+
+Returns:
+
+- A Matplotlib `Figure` object if at least one numerical feature is available.
+- `None` when no visualization can be generated.
+
+---
+
+# Missing Values Heatmap
+
+Visualize missing-value patterns across the dataset.
+
+## Example
+
+```python
+# Create the missing-value heatmap
+fig = plot_missing_heatmap(df)
+
+# Save the figure
+if fig is not None:
+    fig.savefig("missing_values.png")
+```
+
+### Returns
 
 ```python
 matplotlib.figure.Figure | None
@@ -548,453 +1370,1256 @@ matplotlib.figure.Figure | None
 
 ---
 
-### Missing Values Heatmap
+# Correlation Heatmap
 
-Visualize missing-value patterns across the dataset.
+Display statistically significant correlations between numerical features.
 
-```python
-fig = plot_missing_heatmap(df)
-
-if fig:
-    fig.savefig("missing.png")
-```
-
----
-
-### Correlation Heatmap
-
-Display statistically significant feature correlations.
+## Example
 
 ```python
+# Generate the correlation heatmap
 fig = plot_correlation_heatmap(
+
+    # Original dataset
     df,
+
+    # Previously computed analysis
     analysis,
 )
 
-if fig:
-    fig.savefig("correlation.png")
+# Save the generated figure
+if fig is not None:
+    fig.savefig("correlation_heatmap.png")
+```
+
+### Returns
+
+```python
+matplotlib.figure.Figure | None
 ```
 
 ---
 
-### Outlier Summary
+# Outlier Summary
 
-Summarize detected outliers across numeric features.
+Summarize detected outliers across numerical features.
+
+## Example
 
 ```python
+# Create the outlier summary figure
 fig = plot_outlier_summary(analysis)
 
-if fig:
-    fig.savefig("outliers.png")
+# Save the generated figure
+if fig is not None:
+    fig.savefig("outlier_summary.png")
+```
+
+### Returns
+
+```python
+matplotlib.figure.Figure | None
 ```
 
 ---
 
-### Target Distribution
+# Target Distribution
 
-Automatically adapts to regression or classification targets.
+Automatically visualizes the target variable.
+
+The plotting behavior adapts automatically depending on whether the task is:
+
+- Regression
+- Classification
+
+## Example
 
 ```python
+# Generate the target distribution
 fig = plot_target_distribution(
+
+    # Original dataset
     df,
+
+    # Previously computed analysis
     analysis,
 )
 
-if fig:
+# Save the figure
+if fig is not None:
     fig.savefig("target_distribution.png")
 ```
 
 ---
 
-### Target Correlations
+# Target Correlations
 
 Display correlations between numerical features and the target variable.
 
+## Example
+
 ```python
+# Plot feature-target correlations
 fig = plot_target_correlations(
+
+    # Dataset
     df,
+
+    # Analysis dictionary
     analysis,
+
+    # Number of displayed features
     top_n=10,
 )
 
-if fig:
+# Save the figure
+if fig is not None:
     fig.savefig("target_correlations.png")
 ```
 
 ---
 
-### Top Feature Correlations
+# Top Feature Correlations
 
 Display the strongest absolute correlations among numerical features.
 
+## Example
+
 ```python
+# Generate the strongest feature correlations
 fig = plot_top_correlations_bar(
+
+    # Analysis dictionary
     analysis,
+
+    # Number of displayed correlations
     top_n=10,
 )
 
-if fig:
+# Save the figure
+if fig is not None:
     fig.savefig("top_correlations.png")
 ```
 
 ---
 
-### Explanatory Captions
+# Explanatory Captions
 
-Generate human-readable explanations for each visualization.
+Generate human-readable explanations for every generated visualization.
+
+These captions are particularly useful when creating HTML, Markdown, or PDF reports.
+
+## Example
 
 ```python
+# Generate captions
 captions = explain_visualizations(
+
+    # Statistical analysis
     analysis,
+
+    # Generated recommendations
     recommendations,
 )
 
+# Print the caption describing
+# the numerical distribution figure
 print(
     captions["numeric_distributions"]
 )
 ```
 
-**Returns**
+### Returns
 
 ```python
 dict[str, str]
 ```
 
-Available keys include:
+Common keys include:
+
+| Key | Description |
+|------|-------------|
+| `numeric_distributions` | Numerical feature distribution explanation. |
+| `target_distribution` | Target variable explanation. |
+| `correlation_heatmap` | Correlation heatmap explanation. |
+| `missing_values_heatmap` | Missing-value heatmap explanation. |
+| `outlier_summary` | Outlier summary explanation. |
+| `target_correlations` | Target correlation explanation. |
+
+---
+
+# Performance Characteristics
+
+The visualization module is intentionally lightweight.
+
+Performance optimizations include:
+
+- No statistical recomputation.
+- Reuses the existing analysis dictionary.
+- Lazy figure generation.
+- Standard Matplotlib figures.
+- Memory-efficient implementation.
+
+Because all statistics are generated beforehand, plotting large datasets remains efficient.
+
+---
+
+# Best Practices
+
+- Generate the analysis only once before plotting.
+- Reuse the same analysis object across every visualization.
+- Save figures using a lossless format (PNG or SVG) for documentation.
+- Check whether a plotting function returned `None` before saving the figure.
+- Reuse generated captions inside reports to maintain consistency.
+
+---
+
+# Notes
+
+> **Note**
+>
+> Visualization functions never perform statistical analysis internally.
+
+> **Note**
+>
+> Every plotting function returns either a Matplotlib `Figure` or `None`.
+
+> **Note**
+>
+> Styling can be customized through `MLToolkitConfig`.
+
+> **Note**
+>
+> `ReportGenerator` automatically embeds both generated figures and their explanatory captions whenever they are available.
+
+# PreprocessingBuilder
+
+## Overview
+
+`PreprocessingBuilder` converts statistical analysis into a production-ready preprocessing pipeline compatible with the Scikit-learn ecosystem.
+
+Instead of requiring users to manually configure preprocessing steps, the builder interprets the analysis results and automatically selects appropriate transformations based on statistical evidence.
+
+The resulting pipeline is implemented as a standard `sklearn.compose.ColumnTransformer`, allowing it to integrate seamlessly with Scikit-learn estimators, pipelines, cross-validation utilities, and model persistence tools.
+
+The builder never performs statistical analysis itself. It relies entirely on the analysis dictionary generated by `EDAAnalyzer`.
+
+---
+
+## Design Goals
+
+`PreprocessingBuilder` is designed around the following principles:
+
+- Evidence-based preprocessing.
+- Deterministic pipeline generation.
+- Full Scikit-learn compatibility.
+- Transparent preprocessing decisions.
+- Production-ready output.
+- Reproducible workflows.
+
+---
+
+## Responsibilities
+
+The builder automatically determines when preprocessing operations should be applied.
+
+Supported preprocessing operations include:
+
+- Constant feature removal.
+- Quasi-constant feature removal.
+- Missing-value imputation.
+- Power transformations.
+- Numerical scaling.
+- Categorical encoding.
+- Automatic `ColumnTransformer` construction.
+
+Every preprocessing decision is supported by statistical evidence contained in the supplied analysis dictionary.
+
+---
+
+## Workflow
 
 ```text
-numeric_distributions
-target_distribution
-correlation_heatmap
-missing_values_heatmap
-outlier_summary
-target_correlations
+Dataset
+    │
+    ▼
+EDAAnalyzer
+    │
+    ▼
+Analysis Dictionary
+    │
+    ▼
+PreprocessingBuilder
+    │
+    ▼
+ColumnTransformer
+    │
+    ▼
+Machine Learning Model
 ```
 
 ---
 
-### Notes
-
-- All plotting functions optionally accept a configuration object for styling.
-- HTML reports automatically embed generated captions.
-- Every plotting function returns either a `Figure` or `None`.
-
----
-
-## PreprocessingBuilder
-
-### Overview
-
-`PreprocessingBuilder` converts analysis results into a production-ready `scikit-learn` preprocessing pipeline.
-
-All preprocessing decisions are based on statistical evidence rather than manually specified rules.
-
----
-
-### Highlights
-
-- Removes constant and quasi-constant features.
-- Automatically imputes missing values.
-- Applies power transformations to highly skewed features.
-- Scales numerical variables appropriately.
-- Encodes categorical features according to cardinality.
-- Produces a standard `ColumnTransformer`.
-
----
-
-### Example
+## Basic Example
 
 ```python
+# Import the preprocessing builder
 from preml.preprocessing import PreprocessingBuilder
 
+# Create the builder from a completed analysis
 builder = PreprocessingBuilder(
     analysis,
 )
 
+# Build the preprocessing pipeline
 pipeline = builder.build_pipeline()
 ```
 
-**Returns**
+The generated pipeline can be used directly with any Scikit-learn estimator.
+
+---
+
+## Returned Object
 
 ```python
 sklearn.compose.ColumnTransformer
 ```
 
+The returned object behaves exactly like a manually created `ColumnTransformer`.
+
+It supports:
+
+- `fit()`
+- `transform()`
+- `fit_transform()`
+
+and can be inserted into any Scikit-learn `Pipeline`.
+
 ---
 
-### Transform Features
+## Inspecting the Generated Pipeline
+
+The pipeline can be inspected like any standard Scikit-learn transformer.
 
 ```python
-feature_cols = [
-    p.column
-    for p in analysis["feature_profiles"]
+# Build the preprocessing pipeline
+pipeline = builder.build_pipeline()
+
+# Display the generated transformer
+print(pipeline)
+```
+
+Inspecting the generated pipeline is useful for understanding the preprocessing decisions selected by the builder.
+
+---
+
+## Preparing Feature Columns
+
+The target column should not be included when fitting the preprocessing pipeline.
+
+```python
+# Extract feature names from the analysis
+feature_columns = [
+
+    # Each feature profile represents one feature
+    profile.column
+
+    # Iterate over every analyzed feature
+    for profile in analysis["feature_profiles"]
 ]
 
-X = df[feature_cols]
-
-X_transformed, = builder.fit_transform(X)
+# Select only feature columns
+X = df[feature_columns]
 ```
 
-**Returns**
-
-```python
-tuple[np.ndarray]
-```
-
-The transformed feature matrix is obtained using tuple unpacking.
+The analysis dictionary already excludes the target feature when constructing feature profiles.
 
 ---
 
-### Train a Model
+## Fitting and Transforming Data
+
+Fit the generated pipeline and transform the feature matrix.
 
 ```python
+# Fit the preprocessing pipeline
+# and transform the dataset
+X_transformed = builder.fit_transform(
+    X
+)
+```
+
+### Returns
+
+```python
+numpy.ndarray
+```
+
+The transformed feature matrix is returned as a dense NumPy array.
+
+---
+
+## Performing Inference
+
+Once the preprocessing pipeline has been fitted, it can be reused for new data.
+
+```python
+# Transform unseen samples
+X_new = builder.transform(
+    new_data
+)
+```
+
+Only transformation is performed.
+
+The preprocessing pipeline is **not** fitted again.
+
+---
+
+## Training a Machine Learning Model
+
+The transformed features can be passed directly to any Scikit-learn estimator.
+
+```python
+# Import a classifier
 from sklearn.linear_model import LogisticRegression
 
+# Target values
 y = df["target"]
 
+# Create the estimator
 model = LogisticRegression()
 
+# Train the model
 model.fit(
+
+    # Transformed features
     X_transformed,
+
+    # Target labels
     y,
 )
 ```
 
----
-
-### Automatic Pipeline Decisions
-
-The generated preprocessing pipeline automatically performs the following operations when appropriate:
-
-| Operation | Strategy |
-|-----------|----------|
-| Constant features | Removed |
-| Missing numerical values | Mean or Median |
-| Missing categorical values | Most Frequent |
-| Skewed numerical features | Yeo–Johnson transformation |
-| Numerical scaling | `StandardScaler` or `RobustScaler` |
-| Low-cardinality categorical features | `OneHotEncoder` |
-| High-cardinality categorical features | `OrdinalEncoder` |
+Any estimator compatible with Scikit-learn can be used.
 
 ---
 
-### Best Practices
+## Automatic Preprocessing Decisions
 
-- Always remove the target column before calling `fit_transform()`.
-- Reuse the same preprocessing pipeline during training and inference.
-- Serialize the fitted pipeline with `joblib` for deployment.
+The builder selects preprocessing operations dynamically.
 
----
+| Data Characteristic | Automatic Action |
+|--------------------|------------------|
+| Constant feature | Remove feature |
+| Quasi-constant feature | Remove feature |
+| Missing numerical values | Mean or Median imputation |
+| Missing categorical values | Most-frequent imputation |
+| Highly skewed numerical features | Yeo–Johnson transformation |
+| Numerical features | StandardScaler or RobustScaler |
+| Low-cardinality categorical features | OneHotEncoder |
+| High-cardinality categorical features | OrdinalEncoder |
 
-### Notes
+No preprocessing rule depends on feature names.
 
-- `fit_transform()` returns a one-element tuple.
-- The generated pipeline is fully compatible with `scikit-learn`.
-- Additional preprocessing steps can be appended using a standard `Pipeline`.
-
-## FeatureEngineering
-
-### Overview
-
-`FeatureEngineering` analyzes statistical properties of the dataset and proposes meaningful feature engineering opportunities.
-
-Suggestions are generated entirely from statistical evidence rather than feature names, making the recommendations domain-independent and reproducible.
+Every decision is based solely on statistical properties.
 
 ---
 
-### Highlights
+## Pipeline Compatibility
 
-- Data-driven feature suggestions.
-- Ratio feature recommendations.
-- Interaction feature suggestions.
-- Numerical binning recommendations.
-- Power transformation suggestions.
-- Datetime decomposition.
-- Categorical feature crossing.
-- Dynamic confidence scoring.
+The generated pipeline is fully compatible with the Scikit-learn ecosystem.
+
+Supported integrations include:
+
+- `Pipeline`
+- `GridSearchCV`
+- `RandomizedSearchCV`
+- Cross-validation
+- Model persistence
+- Hyperparameter tuning
+- Deployment workflows
+
+Because a standard `ColumnTransformer` is returned, no custom wrappers are required.
 
 ---
 
-### Example
+## Saving the Pipeline
+
+The fitted preprocessing pipeline can be serialized using `joblib`.
 
 ```python
+# Import joblib
+import joblib
+
+# Save the fitted builder
+joblib.dump(
+    builder,
+    "preprocessing.joblib",
+)
+```
+
+Later, the pipeline can be restored without rebuilding it.
+
+```python
+# Restore the fitted builder
+builder = joblib.load(
+    "preprocessing.joblib"
+)
+
+# Transform new data
+X_new = builder.transform(
+    new_data
+)
+```
+
+Persisting the fitted pipeline ensures identical preprocessing during inference.
+
+---
+
+## Performance Characteristics
+
+`PreprocessingBuilder` is optimized for production environments.
+
+Performance characteristics include:
+
+- Vectorized transformations.
+- Automatic column selection.
+- Minimal preprocessing overhead.
+- Efficient Scikit-learn transformers.
+- Deterministic pipeline generation.
+
+Because preprocessing decisions are generated from existing analysis results, no additional statistical computation is performed.
+
+---
+
+## Best Practices
+
+- Run `EDAAnalyzer` before creating the builder.
+- Exclude the target column before fitting.
+- Reuse the same fitted builder during inference.
+- Persist fitted pipelines using `joblib`.
+- Avoid rebuilding identical pipelines multiple times.
+- Use a shared configuration object throughout the workflow.
+
+---
+
+## Common Pitfalls
+
+### Do Not Include the Target Column
+
+```python
+# Correct
+X = df[feature_columns]
+
+# Fit the preprocessing pipeline and transform the feature matrix
+X_transformed = builder.fit_transform(X)
+```
+
+Including the target column may introduce data leakage.
+
+---
+
+### Fit Only Once
+
+```python
+# Training
+builder.fit(X_train)
+
+# Validation or inference
+X_valid = builder.transform(
+    X_valid
+)
+
+X_test = builder.transform(
+    X_test
+)
+```
+
+Do not call `fit_transform()` on validation or test datasets.
+
+### `fit_transform()` Returns a NumPy Array
+
+```python
+# Correct
+X_transformed = builder.fit_transform(X)
+```
+
+`fit_transform()` returns a dense NumPy array directly.
+
+No tuple unpacking is required.
+
+---
+
+### Reuse the Same Pipeline
+
+Always reuse the fitted preprocessing pipeline for:
+
+- Validation.
+- Testing.
+- Production inference.
+
+Rebuilding the pipeline can produce inconsistent preprocessing behavior.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `PreprocessingBuilder` never computes statistics. It only interprets the supplied analysis dictionary.
+
+> **Note**
+>
+> The generated preprocessing pipeline is a standard Scikit-learn `ColumnTransformer`.
+
+> **Note**
+>
+> Every preprocessing decision is based on statistical evidence rather than manually defined feature rules.
+
+> **Note**
+>
+> The transformed output is returned as a dense NumPy array.
+
+> **Note**
+>
+> The fitted preprocessing pipeline should be reused throughout the entire machine learning lifecycle to ensure consistent feature transformations.
+
+# FeatureEngineering
+
+## Overview
+
+`FeatureEngineering` analyzes statistical characteristics of a dataset and generates evidence-based feature engineering recommendations.
+
+Unlike traditional feature engineering tools that rely on predefined feature names or domain-specific heuristics, `FeatureEngineering` evaluates statistical properties—including distributions, correlations, missing values, skewness, and data types—to identify meaningful feature engineering opportunities.
+
+The component **does not modify the dataset**. Instead, it produces structured recommendations that can be reviewed, validated, and selectively implemented by the user.
+
+This design preserves transparency while allowing data scientists to maintain full control over feature creation.
+
+---
+
+## Design Goals
+
+`FeatureEngineering` is built around the following principles:
+
+- Data-driven recommendations.
+- Domain-independent analysis.
+- Explainable feature suggestions.
+- Reproducible decision making.
+- Statistical evidence for every recommendation.
+- Human validation before implementation.
+
+---
+
+## Responsibilities
+
+The component automatically identifies opportunities for:
+
+- Ratio features.
+- Mathematical transformations.
+- Feature interactions.
+- Polynomial features.
+- Numerical binning.
+- Datetime decomposition.
+- Cyclical feature encoding.
+- Categorical feature crossing.
+- Logarithmic and power transformations.
+
+Every recommendation includes one or more pieces of statistical evidence together with a dynamically calculated confidence score.
+---
+
+## Workflow
+
+```text
+Dataset
+    │
+    ▼
+EDAAnalyzer
+    │
+    ▼
+Analysis Dictionary
+    │
+    ▼
+FeatureEngineering
+    │
+    ▼
+Engineering Recommendations
+```
+
+---
+
+## Basic Example
+
+```python
+# Import the feature engineering component
 from preml.feature_engineering import FeatureEngineering
 
-fe = FeatureEngineering(
+# Create the feature engineering engine
+engine = FeatureEngineering(
+
+    # Statistical analysis results
     analysis,
+
+    # Original dataset
     df=df,
 )
 
-suggestions = fe.suggest_features()
+# Generate feature engineering suggestions
+suggestions = engine.suggest_features()
 ```
 
-**Returns**
+The returned recommendations describe potential feature engineering opportunities without modifying the dataset.
+
+---
+
+## Returned Object
 
 ```python
 list[Recommendation]
 ```
 
-Each recommendation contains information such as:
+Each recommendation is represented by a strongly typed object.
 
-- Category
-- Action
-- Confidence
-- Reason
+Typical fields include:
+
+| Attribute | Description |
+|----------|-------------|
+| `category` | Recommendation category. |
+| `action` | Suggested engineering operation. |
+| `confidence` | Estimated confidence score. |
+| `evidence` | A collection of statistical evidence supporting the recommendation. |
 
 ---
 
-### Display Suggestions
+## Viewing Recommendations
+
+Iterate through every generated recommendation.
 
 ```python
+# Display every suggestion
 for suggestion in suggestions:
-    print(
-        f"[{suggestion.confidence:.0%}] "
-        f"{suggestion.action}"
-    )
+
+    # Recommendation category
+    print(suggestion.category)
+
+    # Proposed action
+    print(suggestion.action)
+
+    # Confidence score
+    print(suggestion.confidence)
+
+    # Statistical explanation
+    print(suggestion.reason)
 ```
 
-Example output:
+---
+
+## Example Output
 
 ```text
 [92%] Create a ratio between AnnualIncome and SpendingScore.
 
-[74%] Apply a Yeo-Johnson transformation to TotalSales.
+Reason:
+Strong positive relationship with complementary scales.
 
-[68%] Extract Month and DayOfWeek from OrderDate.
+--------------------------------------------------
+
+[81%] Apply a Yeo–Johnson transformation to TotalSales.
+
+Reason:
+High positive skewness detected.
+
+--------------------------------------------------
+
+[76%] Extract Year, Month, and DayOfWeek from OrderDate.
+
+Reason:
+Datetime features often contain predictive seasonal patterns.
+```
+
+The exact recommendations depend entirely on the statistical characteristics of the dataset.
+
+---
+
+## Recommendation Categories
+
+The engine may generate recommendations from several categories.
+
+| Category | Description |
+|----------|-------------|
+| Ratio Features | Create ratios between related numerical features. |
+| Interaction Features | Multiply or combine informative variables. |
+| Polynomial Features | Capture nonlinear relationships. |
+| Power Transformations | Reduce skewness. |
+| Log Transformations | Stabilize highly skewed distributions. |
+| Numerical Binning | Convert continuous variables into intervals. |
+| Datetime Decomposition | Extract temporal components. |
+| Cyclical Encoding | Encode periodic variables such as months or hours. |
+| Feature Crossing | Combine informative categorical variables. |
+
+The availability of each recommendation depends on the dataset.
+
+---
+
+## Confidence Scores
+
+Every recommendation includes a confidence score.
+
+```python
+# Display recommendation confidence
+for suggestion in suggestions:
+
+    print(
+        suggestion.confidence
+    )
+```
+
+Confidence values range from:
+
+```text
+0.00 ─────────────────────────────► 1.00
+Low Confidence                High Confidence
+```
+
+Higher confidence indicates stronger statistical evidence supporting the recommendation.
+
+Confidence scores should guide prioritization rather than replace proper validation.
+
+---
+
+## Using Recommendations
+
+Recommendations are intentionally separated from implementation.
+
+```python
+# Generate suggestions
+suggestions = engine.suggest_features()
+
+# Review each recommendation
+for suggestion in suggestions:
+
+    # Decide whether to implement it
+    print(suggestion.action)
+```
+
+This approach allows feature engineering decisions to remain transparent and reproducible.
+
+---
+
+## Datetime Features
+
+When the original DataFrame is available, the engine can identify datetime columns and recommend temporal feature extraction.
+
+Possible recommendations include:
+
+- Year
+- Quarter
+- Month
+- Week
+- Day
+- Day of Week
+- Hour
+- Minute
+- Weekend indicator
+
+Temporal recommendations are generated only when statistically meaningful.
+
+---
+
+## Numerical Transformations
+
+The engine evaluates feature distributions and may recommend:
+
+- Log transformation.
+- Square-root transformation.
+- Yeo–Johnson transformation.
+- Box–Cox transformation (when applicable).
+
+These transformations help reduce skewness and improve model performance.
+
+---
+
+## Interaction Features
+
+Interaction recommendations are generated when statistical evidence suggests that combining variables may improve predictive performance.
+
+Examples include:
+
+- Multiplication.
+- Ratios.
+- Differences.
+- Summations.
+
+Only statistically meaningful interactions are suggested.
+
+---
+
+## Performance Characteristics
+
+`FeatureEngineering` reuses previously computed statistical information whenever possible.
+
+Performance characteristics include:
+
+- No repeated statistical analysis.
+- Efficient recommendation generation.
+- Lightweight execution.
+- Minimal memory overhead.
+- Deterministic output.
+
+Execution time depends primarily on the number of analyzed features rather than dataset size.
+
+---
+
+## Best Practices
+
+- Review recommendations before implementation.
+- Validate engineered features using cross-validation.
+- Measure feature importance after engineering.
+- Remove engineered features that do not improve model performance.
+- Document accepted feature engineering decisions.
+
+---
+
+## Common Pitfalls
+
+### Recommendations Are Not Automatic Transformations
+
+```python
+# Generate recommendations
+suggestions = engine.suggest_features()
+```
+
+The engine **does not** modify the dataset.
+
+Users remain responsible for implementing accepted recommendations.
+
+---
+
+### Validate New Features
+
+Always compare model performance before and after introducing engineered features.
+
+Not every statistically reasonable feature will improve predictive performance.
+
+---
+
+### Avoid Feature Explosion
+
+Adding too many engineered features may:
+
+- Increase overfitting.
+- Increase training time.
+- Reduce interpretability.
+- Increase memory consumption.
+
+Only implement features that provide measurable value.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `FeatureEngineering` generates recommendations only. It never modifies the original dataset.
+
+> **Note**
+>
+> Every recommendation is supported by statistical evidence derived from the supplied analysis object.
+
+> **Note**
+>
+> Confidence scores represent the strength of the underlying statistical evidence rather than the expected improvement in model accuracy.
+
+> **Note**
+>
+> Datetime-related recommendations require access to the original DataFrame.
+
+> **Note**
+>
+> Feature engineering recommendations should always be validated using an independent validation set before deployment.
+
+# BaselineTrainer
+
+## Overview
+
+`BaselineTrainer` provides a standardized framework for building, training, and evaluating baseline machine learning models.
+
+Rather than manually configuring preprocessing pipelines, selecting algorithms, and implementing evaluation logic, `BaselineTrainer` automates these repetitive tasks while remaining fully compatible with the Scikit-learn ecosystem.
+
+It combines the preprocessing pipeline generated by `PreprocessingBuilder` with a collection of baseline estimators and evaluates them using cross-validation to establish reliable reference performance.
+
+The objective is **not** to identify the optimal model, but to provide statistically sound baseline results that can guide subsequent experimentation and hyperparameter optimization.
+
+---
+
+## Design Goals
+
+`BaselineTrainer` is designed with the following objectives:
+
+- Rapid baseline experimentation.
+- Fully reproducible evaluations.
+- Automatic preprocessing integration.
+- Consistent evaluation methodology.
+- Standardized performance reporting.
+- Full Scikit-learn compatibility.
+
+---
+
+## Responsibilities
+
+`BaselineTrainer` provides functionality for:
+
+- Building complete machine learning pipelines.
+- Selecting estimators based on task type.
+- Performing cross-validation.
+- Computing evaluation metrics.
+- Comparing multiple baseline models.
+- Returning structured evaluation summaries.
+
+It is intended to accelerate the initial stages of model development rather than replace advanced model optimization.
+
+---
+
+## Workflow
+
+```text
+Dataset
+    │
+    ▼
+EDAAnalyzer
+    │
+    ▼
+PreprocessingBuilder
+    │
+    ▼
+ColumnTransformer
+    │
+    ▼
+BaselineTrainer
+    │
+    ▼
+Cross Validation
+    │
+    ▼
+Evaluation Results
 ```
 
 ---
 
-### Best Practices
+## Supported Tasks
 
-- Treat generated features as hypotheses rather than guaranteed improvements.
-- Validate engineered features using a hold-out validation set.
-- Evaluate feature importance before adding engineered variables to production pipelines.
+`BaselineTrainer` supports both supervised learning paradigms.
 
----
+| Task | Description |
+|------|-------------|
+| Classification | Binary and multiclass classification. |
+| Regression | Continuous target prediction. |
 
-### Notes
-
-- Statistical information is reused from the analysis object.
-- Datetime-related recommendations require the original DataFrame.
-- Confidence scores are calculated dynamically based on the underlying statistics.
+The task type is determined automatically from the generated target profile or can be specified manually.
 
 ---
 
-## BaselineTrainer
-
-### Overview
-
-`BaselineTrainer` builds complete machine learning pipelines and evaluates multiple baseline models using cross-validation.
-
-It provides a fast way to establish reference model performance before hyperparameter tuning.
-
----
-
-### Highlights
-
-- Supports regression and classification tasks.
-- Automatic preprocessing integration.
-- Cross-validation.
-- Multiple baseline algorithms.
-- Metric computation helpers.
-- Configurable evaluation strategy.
-
----
-
-### Example
+## Basic Example
 
 ```python
+# Import the baseline trainer
 from preml.model_utils import BaselineTrainer
 
+# Create the trainer
 trainer = BaselineTrainer(
+
+    # Optional shared configuration
     config=config,
 )
 ```
 
 ---
 
-### Build a Model Pipeline
+## Building a Model Pipeline
+
+A preprocessing pipeline can be combined with a machine learning estimator into a single Scikit-learn pipeline.
 
 ```python
+# Retrieve the target profile
 target_profile = analysis["target_profile"]
 
+# Determine the learning task
 task_type = (
     "regression"
     if target_profile.is_regression
     else "classification"
 )
 
+# Build the complete machine learning pipeline
 model_pipeline = trainer.build_model_pipeline(
+
+    # Preprocessing pipeline
     preprocessing_pipeline=pipeline,
+
+    # Learning task
     task_type=task_type,
 )
 ```
 
----
-
-### Evaluate a Baseline Model
+### Returns
 
 ```python
+sklearn.pipeline.Pipeline
+```
+
+The returned pipeline contains both preprocessing and the selected estimator.
+
+---
+
+## Evaluating a Baseline Model
+
+Evaluate a model using cross-validation.
+
+```python
+# Evaluate the pipeline
 evaluation = trainer.evaluate_baseline(
+
+    # Complete machine learning pipeline
     model_pipeline,
+
+    # Feature matrix
     X=X,
+
+    # Target values
     y=y,
+
+    # Learning task
     task_type=task_type,
+
+    # Number of cross-validation folds
     cv=5,
 )
+```
 
+The evaluation result contains summary statistics for every computed metric.
+
+---
+
+## Viewing Evaluation Results
+
+```python
+# Display the average evaluation metrics
 print(
     evaluation["mean_scores"]
 )
+
+# Display the fold-by-fold results
+print(
+    evaluation["fold_scores"]
+)
 ```
+
+Typical metrics depend on the selected task type.
 
 ---
 
-### Train Recommended Models
+## Training Multiple Baseline Models
+
+Evaluate several candidate models automatically.
 
 ```python
+# Train every supported baseline model
 results = trainer.train_baselines(
+
+    # Statistical analysis
     analysis,
+
+    # Original dataset
     df=df,
+
+    # Target column
     target_col="target",
+
+    # Generated preprocessing pipeline
     preprocessing_pipeline=pipeline,
+
+    # Number of cross-validation folds
     cv=5,
 )
-
-for result in results:
-    print(
-        result["model_name"],
-        result["mean_scores"],
-    )
 ```
+
+The returned collection contains one evaluation result for each trained model.
 
 ---
 
-### Compute Metrics
+## Displaying Model Rankings
 
 ```python
+# Display every evaluated model
+for result in results:
+
+    # Model name
+    print(result["model_name"])
+
+    # Average evaluation scores
+    print(result["mean_scores"])
+```
+
+This allows rapid comparison between multiple baseline algorithms.
+
+---
+
+## Computing Metrics
+
+Individual prediction metrics can also be computed directly.
+
+```python
+# Import the metric helper
 from preml.model_utils import compute_metrics
 
+# Compute prediction metrics
 metrics = compute_metrics(
+
+    # Ground-truth labels
     y_true,
+
+    # Model predictions
     y_pred,
+
+    # Learning task
     task_type="regression",
 )
 ```
 
----
-
-### Cross Validation Helper
+### Returns
 
 ```python
+dict[str, float]
+```
+
+The returned dictionary contains task-specific evaluation metrics.
+
+---
+
+## Cross-Validation Helper
+
+A convenience wrapper is provided for cross-validation.
+
+```python
+# Import the helper
 from preml.model_utils import cross_validate
 
+# Evaluate an estimator
 scores = cross_validate(
+
+    # Machine learning estimator
     estimator,
+
+    # Feature matrix
     X,
+
+    # Target values
     y,
+
+    # Number of folds
     cv=5,
+
+    # Evaluation metrics
     scoring=[
         "accuracy",
         "f1_macro",
@@ -1002,416 +2627,1003 @@ scores = cross_validate(
 )
 ```
 
----
-
-### Notes
-
-- `train_baselines()` requires the original DataFrame, including the target column.
-- Model pipelines are fully compatible with `scikit-learn`.
-- Use a fixed `random_state` to ensure reproducible experiments.
+This helper simplifies repeated evaluation workflows while remaining compatible with Scikit-learn conventions.
 
 ---
 
-## ReportGenerator
+## Supported Evaluation Strategy
 
-### Overview
+Baseline models are evaluated using cross-validation.
 
-`ReportGenerator` creates comprehensive reports from analysis results.
+Typical workflow:
 
-Reports combine statistics, recommendations, visualizations, and explanatory text into a single document suitable for sharing with stakeholders or documenting experiments.
+```text
+Dataset
+    │
+    ├──────── Fold 1
+    ├──────── Fold 2
+    ├──────── Fold 3
+    ├──────── Fold 4
+    └──────── Fold 5
+             │
+             ▼
+      Average Performance
+```
+
+Cross-validation provides more reliable performance estimates than a single train/test split.
 
 ---
 
-### Highlights
+## Performance Characteristics
 
-- HTML reports.
-- Markdown reports.
-- Plain-text reports.
-- Embedded visualizations.
-- Automatic explanatory captions.
-- Executive summary.
-- Data quality score.
-- Recommendation summary.
+`BaselineTrainer` is optimized for rapid experimentation.
+
+Performance characteristics include:
+
+- Automatic preprocessing integration.
+- Efficient Scikit-learn pipelines.
+- Parallelizable cross-validation.
+- Reusable preprocessing pipeline.
+- Standardized evaluation outputs.
+
+Overall execution time depends primarily on:
+
+- Dataset size.
+- Number of evaluated models.
+- Number of cross-validation folds.
+- Model complexity.
 
 ---
 
-### Example
+## Best Practices
+
+- Use a fixed `random_state` for reproducibility.
+- Reuse the preprocessing pipeline generated by `PreprocessingBuilder`.
+- Compare several baseline models before hyperparameter tuning.
+- Interpret cross-validation results rather than relying on a single split.
+- Persist the best-performing pipeline after evaluation.
+
+---
+
+## Common Pitfalls
+
+### Keep the Target Column in the Original Dataset
 
 ```python
+# Correct
+results = trainer.train_baselines(
+
+    analysis,
+
+    df=df,
+
+    target_col="target",
+
+    preprocessing_pipeline=pipeline,
+)
+```
+
+`train_baselines()` extracts both the feature matrix and target values internally.
+
+Removing the target column beforehand prevents the trainer from constructing the learning dataset.
+
+---
+
+### Do Not Tune Hyperparameters Too Early
+
+Baseline evaluation is intended to establish a reliable performance reference.
+
+Hyperparameter optimization should be performed only after selecting promising candidate models.
+
+---
+
+### Reuse the Same Preprocessing Pipeline
+
+Always evaluate every model using the same fitted preprocessing pipeline.
+
+Changing preprocessing between models can invalidate performance comparisons.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `BaselineTrainer` is intended for baseline experimentation rather than exhaustive model optimization.
+
+> **Note**
+>
+> Every generated pipeline is fully compatible with the Scikit-learn ecosystem.
+
+> **Note**
+>
+> Cross-validation is recommended over a single train/test split whenever computationally feasible.
+
+> **Note**
+>
+> Reusing the same preprocessing pipeline across all evaluated models ensures fair and reproducible comparisons.
+
+> **Note**
+>
+> Baseline performance should serve as a reference point before applying feature engineering, hyperparameter tuning, or advanced ensemble methods.
+
+# ReportGenerator
+
+## Overview
+
+`ReportGenerator` creates comprehensive, publication-ready reports from a completed analysis workflow.
+
+Rather than simply exporting raw statistics, it combines statistical analysis, preprocessing recommendations, visualizations, model suggestions, and explanatory text into a single structured document suitable for technical documentation, stakeholder communication, experiment tracking, and reproducible machine learning workflows.
+
+Reports can be generated in multiple formats without requiring additional processing.
+
+---
+
+## Design Goals
+
+`ReportGenerator` is designed to provide:
+
+- Comprehensive dataset documentation.
+- Reproducible experiment reports.
+- Publication-ready output.
+- Multiple export formats.
+- Automatic visualization integration.
+- Human-readable explanations.
+- Minimal configuration.
+
+---
+
+## Responsibilities
+
+`ReportGenerator` is responsible for:
+
+- Generating HTML reports.
+- Generating Markdown reports.
+- Generating plain-text reports.
+- Embedding generated visualizations.
+- Including statistical summaries.
+- Including preprocessing recommendations.
+- Including data quality assessments.
+- Including baseline model recommendations.
+- Producing self-contained reports suitable for sharing.
+
+---
+
+## Workflow
+
+```text
+Dataset
+    │
+    ▼
+EDAAnalyzer
+    │
+    ▼
+Analysis Dictionary
+    │
+    ├───────────────┐
+    ▼               ▼
+Visualization   RecommendationEngine
+    │               │
+    └───────────────┘
+            │
+            ▼
+      ReportGenerator
+            │
+            ▼
+ HTML / Markdown / Text Report
+```
+
+---
+
+## Supported Output Formats
+
+| Format | Description |
+|---------|-------------|
+| HTML | Interactive report with embedded figures. |
+| Markdown | Lightweight documentation suitable for GitHub. |
+| Plain Text | Console-friendly report without formatting. |
+
+---
+
+## Basic Example
+
+```python
+# Import the report generator
 from preml.report import ReportGenerator
 
+# Create the report generator
 report = ReportGenerator(
+
+    # Statistical analysis
     analysis,
+
+    # Original dataset (optional)
     df=df,
 )
 ```
 
 ---
 
-### Save Reports
+## Saving Reports
+
+Generate and save reports directly to disk.
 
 ```python
+# Save an HTML report
 report.save_report(
+
+    # Output file
     "report.html",
+
+    # Output format
     format="html",
 )
 
+# Save a Markdown report
 report.save_report(
     "report.md",
     format="md",
 )
 
+# Save a plain-text report
 report.save_report(
     "report.txt",
     format="txt",
 )
 ```
 
+The appropriate generator is selected automatically based on the specified format.
+
 ---
 
-### Generate Raw Content
+## Generating Report Content
+
+Reports may also be generated as strings without writing files.
+
+### HTML
 
 ```python
+# Generate HTML content
 html = report.generate_html(
+
+    # Embed generated figures
     embed_plots=True,
 )
+```
 
+---
+
+### Markdown
+
+```python
+# Generate Markdown content
 markdown = report.generate_markdown()
+```
 
+---
+
+### Plain Text
+
+```python
+# Generate plain-text content
 text = report.generate_text()
 ```
 
-**Returns**
+---
+
+## Returns
+
+Every report generation method returns:
 
 ```python
 str
 ```
 
+The returned string may be:
+
+- Written to disk.
+- Stored in a database.
+- Uploaded to experiment tracking systems.
+- Displayed inside notebooks.
+- Sent through APIs.
+
 ---
 
-### HTML Report Contents
+## HTML Report Contents
 
-Generated HTML reports include:
+Generated HTML reports typically include:
 
 - Executive summary.
 - Dataset metadata.
-- Missing value analysis.
+- Missing-value analysis.
 - Duplicate analysis.
+- Infinite-value analysis.
 - Outlier analysis.
+- Feature profiles.
 - Correlation analysis.
 - Target profile.
 - Data quality score.
 - Evidence-based recommendations.
-- Ranked model suggestions.
+- Baseline model recommendations.
 - Embedded visualizations.
-- Automatically generated explanatory captions.
+- Automatically generated figure captions.
+
+The exact contents depend on the available analysis data.
 
 ---
 
-### Notes
+## Markdown Report Contents
 
-- If the original DataFrame is unavailable, statistical information is still included while visualizations are omitted.
-- Visualization captions are generated automatically through `explain_visualizations()`.
-- HTML reports are fully self-contained and suitable for sharing without additional resources.
+Markdown reports are optimized for:
+
+- GitHub repositories.
+- Project documentation.
+- Experiment logs.
+- Version control.
+- Technical documentation.
+
+Markdown output excludes HTML-specific features while preserving all statistical information.
 
 ---
 
-## Next Section
+## Plain-Text Report Contents
 
-The following sections cover:
+Plain-text reports are intended for:
 
-- End-to-End Workflow
-- Performance
-- Thread Safety
-- Reproducibility
-- Best Practices
-- Common Pitfalls
-- FAQ
-- Component Relationships
-- Architecture
-- API Reference
-- License
-- Citation
+- Command-line applications.
+- Logging.
+- Automated pipelines.
+- Terminal output.
+- Lightweight documentation.
+
+Formatting is intentionally simplified to maximize compatibility.
+
+---
+
+## Embedded Visualizations
+
+HTML reports can automatically include generated figures.
+
+```python
+# Embed figures directly inside the report
+html = report.generate_html(
+    embed_plots=True,
+)
+```
+
+Embedded figures improve report portability because no external image files are required.
+
+---
+
+## Automatic Figure Captions
+
+When visualizations are available, explanatory captions are generated automatically.
+
+These captions describe:
+
+- Feature distributions.
+- Missing-value patterns.
+- Correlation structures.
+- Outlier summaries.
+- Target distributions.
+
+This makes reports easier to interpret for both technical and non-technical audiences.
+
+---
+
+## Working Without the Original Dataset
+
+Providing the original DataFrame is optional.
+
+```python
+# Create a report using only the analysis dictionary
+report = ReportGenerator(
+    analysis,
+)
+```
+
+When the original dataset is unavailable:
+
+- Statistical summaries remain available.
+- Recommendations remain available.
+- Data quality information remains available.
+- Visualizations are omitted automatically.
+
+This behavior allows reports to be regenerated long after the original dataset has been removed.
+
+---
+
+## Performance Characteristics
+
+`ReportGenerator` reuses existing analysis results.
+
+Performance characteristics include:
+
+- No repeated statistical analysis.
+- Automatic reuse of generated figures.
+- Lazy report generation.
+- Minimal memory overhead.
+- Efficient HTML generation.
+
+Report generation time depends primarily on the number of visualizations included.
+
+---
+
+## Best Practices
+
+- Generate the analysis once and reuse it throughout the workflow.
+- Include the original DataFrame when visualizations are required.
+- Prefer HTML reports for interactive exploration.
+- Use Markdown reports for project documentation.
+- Archive generated reports together with trained models.
+
+---
+
+## Common Pitfalls
+
+### Missing Visualizations
+
+```python
+# Reports generated without the original dataset
+# cannot include visualizations.
+report = ReportGenerator(
+    analysis
+)
+```
+
+Always provide the original DataFrame when graphical output is desired.
+
+---
+
+### Regenerating Analysis
+
+Avoid rerunning the analysis solely to generate reports.
+
+Instead, reuse the existing analysis dictionary.
+
+This ensures:
+
+- Faster execution.
+- Consistent statistics.
+- Reproducible documentation.
+
+---
+
+## Notes
+
+> **Note**
+>
+> `ReportGenerator` never recomputes statistics. It only formats existing analysis results.
+
+> **Note**
+>
+> HTML reports are fully self-contained when figures are embedded.
+
+> **Note**
+>
+> Visualization captions are generated automatically whenever visualizations are available.
+
+> **Note**
+>
+> Reports are deterministic when generated from the same analysis object.
+
+> **Note**
+>
+> Generated reports are intended for documentation and communication. They do not modify the original dataset or machine learning pipeline.
 
 # End-to-End Workflow
 
-The following example demonstrates a complete machine learning workflow using PreML.
+This section demonstrates a complete machine learning workflow using PreML.
+
+The example illustrates how the library components interact to transform a raw dataset into a fully analyzed, preprocessed, evaluated, and documented machine learning project.
+
+The workflow consists of the following stages:
+
+1. Load the dataset.
+2. Perform exploratory data analysis.
+3. Build a preprocessing pipeline.
+4. Transform the feature matrix.
+5. Generate feature engineering recommendations.
+6. Train baseline models.
+7. Generate a comprehensive report.
+
+---
+
+## Complete Example
 
 ```python
+# Import pandas
 import pandas as pd
 
-from preml.eda import EDAAnalyzer
+# Import the high-level EDA helper
+from preml import quick_eda
+
+# Import preprocessing utilities
 from preml.preprocessing import PreprocessingBuilder
+
+# Import feature engineering recommendations
 from preml.feature_engineering import FeatureEngineering
+
+# Import baseline model utilities
 from preml.model_utils import BaselineTrainer
+
+# Import the report generator
 from preml.report import ReportGenerator
 
-# Load the dataset
+# ----------------------------------------------------
+# Step 1 — Load the dataset
+# ----------------------------------------------------
+
 df = pd.read_csv("data.csv")
+
+# Specify the target column
 target = "target_column"
 
-# 1. Exploratory Data Analysis
-analysis = EDAAnalyzer(
-    df,
-    target=target,
-).run()
+# ----------------------------------------------------
+# Step 2 — Perform exploratory data analysis
+# ----------------------------------------------------
 
-# 2. Build preprocessing pipeline
-builder = PreprocessingBuilder(analysis)
+analysis = quick_eda(
+
+    # Dataset
+    df,
+
+    # Target column
+    target=target,
+)
+
+# ----------------------------------------------------
+# Step 3 — Build the preprocessing pipeline
+# ----------------------------------------------------
+
+builder = PreprocessingBuilder(
+    analysis
+)
+
 pipeline = builder.build_pipeline()
 
-feature_cols = [
+# ----------------------------------------------------
+# Step 4 — Prepare the feature matrix
+# ----------------------------------------------------
+
+# Collect feature names
+feature_columns = [
+
     profile.column
+
     for profile in analysis["feature_profiles"]
 ]
 
-X_transformed, = builder.fit_transform(
-    df[feature_cols]
+# Transform the features
+X = builder.fit_transform(
+    df[feature_columns]
 )
 
-# 3. Feature engineering suggestions
+# ----------------------------------------------------
+# Step 5 — Generate feature engineering suggestions
+# ----------------------------------------------------
+
 feature_engineering = FeatureEngineering(
+
     analysis,
+
     df=df,
 )
 
-for suggestion in feature_engineering.suggest_features():
+suggestions = feature_engineering.suggest_features()
+
+# Display generated suggestions
+for suggestion in suggestions:
+
     print(suggestion.action)
 
-# 4. Train baseline models
+# ----------------------------------------------------
+# Step 6 — Train baseline models
+# ----------------------------------------------------
+
 trainer = BaselineTrainer()
 
 results = trainer.train_baselines(
+
     analysis,
+
     df=df,
+
     target_col=target,
+
     preprocessing_pipeline=pipeline,
+
     cv=5,
 )
 
-# 5. Generate report
+# Display evaluation results
+for result in results:
+
+    print(result["model_name"])
+    print(result["mean_scores"])
+
+# ----------------------------------------------------
+# Step 7 — Generate a report
+# ----------------------------------------------------
+
 ReportGenerator(
+
     analysis,
+
     df=df,
+
 ).save_report(
+
     "report.html",
+
     format="html",
 )
 ```
 
 ---
 
+## Workflow Summary
+
+The previous example performs the following operations:
+
+| Step | Description |
+|------|-------------|
+| 1 | Loads the dataset. |
+| 2 | Computes statistical analysis. |
+| 3 | Generates preprocessing recommendations. |
+| 4 | Builds a production-ready preprocessing pipeline. |
+| 5 | Transforms the feature matrix. |
+| 6 | Generates feature engineering recommendations. |
+| 7 | Trains multiple baseline models. |
+| 8 | Evaluates model performance using cross-validation. |
+| 9 | Produces a publication-ready report. |
+
+---
+
+## Workflow Diagram
+
+```text
+                   Dataset
+                      │
+                      ▼
+                 quick_eda()
+                      │
+                      ▼
+             Analysis Dictionary
+                      │
+      ┌───────────────┼────────────────┐
+      ▼               ▼                ▼
+Visualization   Recommendations   Data Quality
+      │               │
+      └───────────────┘
+              │
+              ▼
+    PreprocessingBuilder
+              │
+              ▼
+     Transformed Features
+              │
+              ▼
+    FeatureEngineering
+              │
+              ▼
+     BaselineTrainer
+              │
+              ▼
+     ReportGenerator
+              │
+              ▼
+        HTML / Markdown
+```
+
+---
+
+## Expected Outputs
+
+After completing the workflow, the following artifacts are available:
+
+- Statistical analysis results.
+- Data quality assessment.
+- Feature profiles.
+- Correlation analysis.
+- Preprocessing recommendations.
+- Feature engineering suggestions.
+- Production-ready preprocessing pipeline.
+- Transformed feature matrix.
+- Baseline model evaluation.
+- Comprehensive project report.
+
+---
+
+## Best Practices
+
+- Execute the analysis only once.
+- Reuse the generated analysis dictionary throughout the workflow.
+- Fit the preprocessing pipeline only on the training data.
+- Validate feature engineering recommendations before deployment.
+- Compare multiple baseline models before hyperparameter tuning.
+- Archive generated reports together with trained models.
+- Save fitted preprocessing pipelines for inference.
+
+---
+
+## Notes
+
+> **Note**
+>
+> Every component in this workflow is independent and may also be used individually.
+
+> **Note**
+>
+> The analysis dictionary serves as the central data structure shared across the entire workflow.
+
+> **Note**
+>
+> No statistical analysis is repeated after the initial call to `quick_eda()`, ensuring efficient execution even in larger machine learning projects.
+
+> **Note**
+>
+> This workflow is intended as a production-oriented starting point. Individual projects may extend it with feature selection, hyperparameter optimization, model explainability, or deployment stages.
+
 # Performance
 
-PreML is designed to minimize unnecessary computation while remaining fully transparent.
+PreML is designed to minimize redundant computation while maintaining complete transparency throughout the machine learning workflow.
 
-## Performance Characteristics
+Instead of repeatedly analyzing the dataset at each stage, statistical information is computed once and reused by downstream components. This design significantly reduces execution time and ensures consistent results across the entire workflow.
 
-- Statistics are computed once and reused throughout the workflow.
-- Visualization functions never recompute statistics.
-- Report generation reuses the existing analysis results.
-- Vectorized NumPy and pandas operations are used whenever possible.
-- Percentile calculations are optimized for numerical features.
-- Correlation analysis avoids redundant computations.
+---
+
+## Performance Principles
+
+The library follows several core performance principles:
+
+- Compute statistics only once.
+- Reuse intermediate analysis results.
+- Prefer vectorized operations.
+- Avoid unnecessary memory allocations.
+- Separate statistical analysis from interpretation.
+- Reuse preprocessing pipelines whenever possible.
+
+These principles allow PreML to scale efficiently from small exploratory datasets to large production workloads.
+
+---
+
+## Analysis Reuse
+
+One of the primary optimizations in PreML is the reuse of the analysis dictionary.
+
+```text
+Dataset
+    │
+    ▼
+Statistics (Executed Once)
+    │
+    ▼
+Analysis Dictionary
+    │
+    ├────────────► Visualization
+    ├────────────► RecommendationEngine
+    ├────────────► FeatureEngineering
+    ├────────────► PreprocessingBuilder
+    ├────────────► ReportGenerator
+    └────────────► BaselineTrainer
+```
+
+Because every component consumes the same analysis object, statistical computations are never repeated.
+
+---
+
+## Computational Characteristics
+
+The following table summarizes how each component interacts with statistical analysis.
+
+| Component | Role | Computes Statistics | Reuses Existing Analysis |
+|-----------|------|---------------------|--------------------------|
+| `EDAAnalyzer` | High-level analysis orchestrator | Yes | No |
+| `StatisticsEngine` | Statistical computation engine | Yes | No |
+| `RecommendationEngine` | Recommendation generation | No | Yes |
+| `Visualization` | Visualization generation | No | Yes |
+| `PreprocessingBuilder` | Preprocessing pipeline construction | No | Yes |
+| `FeatureEngineering` | Feature engineering recommendations | No | Yes |
+| `BaselineTrainer` | Model training and evaluation | No* | Yes |
+| `ReportGenerator` | Report generation | No | Yes |
+
+\* `BaselineTrainer` trains machine learning models but does not recompute dataset statistics. It consumes the existing analysis dictionary together with the preprocessing pipeline.
+
+---
+
+`EDAAnalyzer` and `StatisticsEngine` are the only components responsible for computing statistical information.
+
+All remaining components consume the generated analysis dictionary, ensuring that statistical analysis is performed only once during a typical workflow. This design eliminates redundant computation, improves consistency across components, and reduces overall execution time.
+
+---
+
+## Vectorized Operations
+
+Numerical computations rely heavily on optimized implementations provided by:
+
+- NumPy
+- pandas
+- SciPy
+- Scikit-learn
+
+Vectorized operations are preferred over explicit Python loops whenever feasible.
+
+---
+
+## Visualization Performance
+
+Visualization functions are intentionally lightweight.
+
+They:
+
+- Reuse the analysis dictionary.
+- Never recompute statistics.
+- Generate figures only when requested.
+- Return standard Matplotlib objects.
+
+This allows reports to include visualizations without performing additional analysis.
+
+---
+
+## Model Evaluation Performance
+
+Model evaluation is typically the most computationally expensive stage.
+
+Execution time depends on:
+
+- Dataset size.
+- Number of evaluated models.
+- Cross-validation folds.
+- Selected algorithms.
+- Hardware resources.
+
+When evaluating many models, execution time is dominated by model training rather than PreML itself.
+
+---
+
+## Performance Recommendations
+
+For large datasets:
+
+- Remove unused columns.
+- Use appropriate numerical data types.
+- Sample exploratory datasets when appropriate.
+- Avoid unnecessary visualization generation.
+- Reuse fitted preprocessing pipelines.
+- Persist trained models for later reuse.
 
 ---
 
 # Thread Safety
 
-Each component is independent after construction.
+Most PreML components are designed to be independent after construction.
 
-Parallel workflows are supported provided that each thread owns its own analyzer or statistics engine instance.
+This enables safe parallel execution provided that each worker owns its own component instance.
 
-Sharing a read-only analysis dictionary between threads is safe.
+---
 
-Avoid modifying the analysis dictionary concurrently.
+## Safe Parallel Usage
+
+The following pattern is recommended.
+
+```text
+Thread 1
+    │
+    └── EDAAnalyzer Instance A
+
+Thread 2
+    │
+    └── EDAAnalyzer Instance B
+
+Thread 3
+    │
+    └── EDAAnalyzer Instance C
+```
+
+Each thread works independently without sharing mutable state.
+
+---
+
+## Shared Objects
+
+The analysis dictionary may safely be shared between threads **provided it is treated as read-only**.
+
+Safe usage:
+
+- Visualization.
+- Report generation.
+- Recommendation generation.
+- Feature engineering suggestions.
+
+Unsafe usage:
+
+- Modifying dictionary contents.
+- Mutating nested objects.
+- Concurrent writes.
+
+---
+
+## Best Practices
+
+- Create one analyzer per thread.
+- Avoid mutating shared analysis objects.
+- Persist immutable artifacts after analysis.
+- Reuse analysis dictionaries in read-only mode.
 
 ---
 
 # Reproducibility
 
-For deterministic experiments, specify a fixed `random_state` in `MLToolkitConfig`.
+Reproducibility is a fundamental design objective of PreML.
+
+Whenever possible, computations are deterministic and produce identical outputs for identical inputs.
+
+---
+
+## Random State
+
+Components that rely on randomized algorithms should receive a fixed random seed.
 
 ```python
+# Import the configuration class
 from preml.config import MLToolkitConfig
 
+# Create a reproducible configuration
 config = MLToolkitConfig(
+
+    # Fixed random seed
     random_state=42,
 )
 ```
 
-The statistics engine itself is deterministic and performs no random sampling.
+Using a fixed seed ensures reproducible preprocessing and model evaluation whenever supported by the underlying algorithms.
 
 ---
 
-# Best Practices
+## Deterministic Components
 
-- Reuse a single `MLToolkitConfig` instance throughout the workflow.
-- Sample extremely large datasets before running analysis.
-- Validate engineered features on an independent validation set.
-- Exclude the target column before preprocessing.
-- Check whether visualization functions return `None`.
-- Reuse fitted preprocessing pipelines during inference.
-- Persist trained pipelines using `joblib`.
+The following components are deterministic.
 
----
+| Component | Deterministic |
+|-----------|---------------|
+| StatisticsEngine | Yes |
+| EDAAnalyzer | Yes |
+| RecommendationEngine | Yes |
+| Visualization | Yes |
+| FeatureEngineering | Yes |
+| ReportGenerator | Yes |
 
-# Common Pitfalls
-
-## `fit_transform()` Returns a Tuple
-
-```python
-# Correct
-X_transformed, = builder.fit_transform(X)
-```
+Model training reproducibility depends on the selected estimator and its configuration.
 
 ---
 
-## `train_baselines()` Requires the Original DataFrame
+## Recommendations
 
-```python
-trainer.train_baselines(
-    analysis,
-    df=df,
-    target_col="target",
-)
-```
+For reproducible experiments:
 
-Do not remove the target column before calling this method.
+- Use a fixed `random_state`.
+- Archive the generated analysis dictionary.
+- Persist preprocessing pipelines.
+- Record library versions.
+- Save generated reports.
+- Preserve model evaluation metrics.
+- Version datasets whenever possible.
 
----
-
-## Plot Functions May Return `None`
-
-```python
-fig = plot_missing_heatmap(df)
-
-if fig:
-    fig.savefig("missing.png")
-```
+Following these practices makes experiments easier to reproduce and compare over time.
 
 ---
 
-## Missing Scaling Recommendation
+## Notes
 
-Access recommendations directly.
+> **Note**
+>
+> Statistical analysis is deterministic and does not involve random sampling.
 
-```python
-analysis["recommendations"]["scaling"]
-```
+> **Note**
+>
+> Some Scikit-learn estimators include stochastic algorithms and require a fixed `random_state` for reproducible results.
 
----
-
-# FAQ
-
-## Why does `fit_transform()` return a tuple?
-
-The preprocessing builder reserves the ability to return additional artifacts in future releases while maintaining backward compatibility.
-
----
-
-## Why are some plots empty?
-
-Visualization functions return `None` whenever no meaningful visualization can be generated.
-
----
-
-## Can I use only the statistical analysis?
-
-Yes.
-
-Use `StatisticsEngine` instead of `EDAAnalyzer`.
-
----
-
-## Can I customize the preprocessing pipeline?
-
-Yes.
-
-`PreprocessingBuilder` produces a standard `scikit-learn` `ColumnTransformer` that can be extended using `Pipeline`.
-
----
-
-# Component Relationships
-
-| Component | Depends On |
-|-----------|------------|
-| `StatisticsEngine` | DataFrame |
-| `RecommendationEngine` | Analysis dictionary |
-| `Visualization` | Analysis dictionary + DataFrame |
-| `PreprocessingBuilder` | Analysis dictionary |
-| `FeatureEngineering` | Analysis dictionary (+ optional DataFrame) |
-| `BaselineTrainer` | Analysis dictionary + preprocessing pipeline |
-| `ReportGenerator` | Analysis dictionary (+ optional DataFrame) |
-
----
-
-# Architecture
-
-```text
-                    Dataset
-                        │
-                        ▼
-                 EDAAnalyzer
-                        │
-        ┌───────────────┼────────────────┐
-        ▼               ▼                ▼
-   Statistics    Recommendations   Quality Score
-        │               │
-        └───────────────┘
-                │
-                ▼
-      PreprocessingBuilder
-                │
-                ▼
-      FeatureEngineering
-                │
-                ▼
-        BaselineTrainer
-                │
-                ▼
-        ReportGenerator
-```
-
----
-
-# API Reference
-
-| Module | Main Classes / Functions |
-|---------|--------------------------|
-| `preml.eda` | `EDAAnalyzer`, `quick_eda` |
-| `preml.statistics_engine` | `StatisticsEngine` |
-| `preml.recommendation_engine` | `RecommendationEngine` |
-| `preml.visualization` | Plotting functions, `explain_visualizations()` |
-| `preml.preprocessing` | `PreprocessingBuilder` |
-| `preml.feature_engineering` | `FeatureEngineering` |
-| `preml.model_utils` | `BaselineTrainer`, `compute_metrics()`, `cross_validate()` |
-| `preml.report` | `ReportGenerator` |
-| `preml.config` | `MLToolkitConfig`, `default_config` |
-| `preml.exceptions` | All toolkit exceptions |
-
-For detailed information about every class and method, refer to the source docstrings.
-
----
-
-# License
-
-PreML is released under the **MIT License**.
-
-See the `LICENSE` file for complete licensing information.
-
----
-
-# Citation
-
-If PreML contributes to your research, publication, or production system, please consider citing the project.
-
-```bibtex
-@software{preml,
-  author    = {Ali Nazer},
-  title     = {PreML: Automated EDA, Preprocessing, and Baseline Modeling},
-  year      = {2025},
-  publisher = {GitHub},
-  url       = {https://github.com/alinazer30/preml}
-}
-```
+> **Note**
+>
+> Reusing the same analysis dictionary throughout the workflow guarantees that every downstream component operates on identical statistical information.

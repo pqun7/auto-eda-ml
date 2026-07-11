@@ -4,16 +4,22 @@ statistical facts and the original data.
 
 This module NEVER computes statistics; it uses the supplied DataFrame
 only for plotting raw values.  All plotting functions accept an
-optional `ax` for composability and return the figure.
+optional `config` for consistent styling and return the figure.
 
-A new utility function `explain_visualizations` provides
-human-readable explanations of each plot type, based on the actual
-data characteristics, and integrates recommendations from the
+.. note::
+    The function ``_apply_style`` modifies the global seaborn style
+    using the provided configuration.  If you have already set a
+    custom style, it will be overridden.
+
+A utility function ``explain_visualizations`` provides human-readable
+explanations of each plot type, based on the actual data
+characteristics, and integrates recommendations from the
 RecommendationEngine to suggest concrete next steps.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
@@ -28,6 +34,8 @@ from preml.schema import (
     OutlierReport,
     TargetProfile,
 )
+
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
 # Internal helpers
@@ -60,16 +68,14 @@ def _get_missing_columns(df: pd.DataFrame, max_cols: int = 50) -> List[str]:
 
 
 def _apply_style(cfg: MLToolkitConfig) -> None:
-    """Set global Seaborn style and palette from config with safe defaults."""
-    style = getattr(cfg, "plot_style", "whitegrid")
-    palette = getattr(cfg, "color_palette", "muted")
-    sns.set_style(style)
-    sns.set_palette(palette)
+    """Set global Seaborn style and palette from config."""
+    sns.set_style(cfg.plot_style)
+    sns.set_palette(cfg.color_palette)
 
 
 def _safe_figsize(cfg: MLToolkitConfig, default_size=(10, 6)) -> tuple:
-    """Return a valid figure size tuple, falling back to `default_size`."""
-    sz = getattr(cfg, "figure_size", default_size)
+    """Return a valid figure size tuple, falling back to *default_size*."""
+    sz = cfg.figure_size
     if isinstance(sz, (tuple, list)) and len(sz) == 2:
         return tuple(sz)
     return default_size
@@ -496,6 +502,34 @@ def plot_target_correlations(
 # ------------------------------------------------------------------
 # Explanatory text generation (enhanced with recommendations)
 # ------------------------------------------------------------------
+def _format_recommendation_list(rec_list: List, indent: str = "  - ") -> str:
+    """Format a list of Recommendation objects into a string."""
+    if not rec_list:
+        return ""
+    items = []
+    for rec in rec_list:
+        items.append(f"{indent}{rec.action} (confidence: {rec.confidence:.0%})")
+    return "\n".join(items)
+
+
+def _ensure_recommendations(
+    analysis_result: Dict[str, Any],
+    recommendations: Optional[Dict[str, Any]],
+    config: Optional[MLToolkitConfig],
+) -> Dict[str, Any]:
+    """Return the recommendations dict, generating them if necessary."""
+    if recommendations is not None:
+        return recommendations
+    try:
+        from preml.recommendation_engine import RecommendationEngine
+
+        engine = RecommendationEngine(config=config, enable_feature_engineering=False)
+        return engine.generate_recommendations(analysis_result)
+    except Exception:
+        logger.warning("Failed to generate recommendations for explanations.", exc_info=True)
+        return {}
+
+
 def explain_visualizations(
     analysis_result: Dict[str, Any],
     recommendations: Optional[Dict[str, Any]] = None,
@@ -537,34 +571,14 @@ def explain_visualizations(
     # ------------------------------------------------------------------
     # Ensure we have recommendations
     # ------------------------------------------------------------------
-    if recommendations is None:
-        # Local import to avoid circular dependency at module level
-        from preml.recommendation_engine import RecommendationEngine
+    recs = _ensure_recommendations(analysis_result, recommendations, config)
 
-        engine = RecommendationEngine(config=config, enable_feature_engineering=False)
-        recommendations = engine.generate_recommendations(analysis_result)
-
-    # ------------------------------------------------------------------
     # Extract relevant parts from recommendations
-    # ------------------------------------------------------------------
-    imputation_recs = recommendations.get("imputation", [])
-    outlier_recs = recommendations.get("outlier_handling", [])
-    transformation_recs = recommendations.get("transformation", [])
-    scaling_rec = recommendations.get("scaling")
-    encoding_recs = recommendations.get("encoding", [])
-    feature_selection_recs = recommendations.get("feature_selection", [])
-    data_quality_notes = recommendations.get("data_quality_notes", [])
-
-    # ------------------------------------------------------------------
-    # Helper to format a list of recommendation strings
-    # ------------------------------------------------------------------
-    def _format_recs(rec_list, indent="  - "):
-        if not rec_list:
-            return ""
-        items = []
-        for rec in rec_list:
-            items.append(f"{indent}{rec.action} (confidence: {rec.confidence:.0%})")
-        return "\n".join(items)
+    imputation_recs = recs.get("imputation", [])
+    outlier_recs = recs.get("outlier_handling", [])
+    transformation_recs = recs.get("transformation", [])
+    scaling_rec = recs.get("scaling")
+    feature_selection_recs = recs.get("feature_selection", [])
 
     explanations: Dict[str, str] = {}
 
@@ -592,12 +606,12 @@ def explain_visualizations(
         lines.append("**Recommended actions:**")
         if transformation_recs:
             lines.append("  Transformations to reduce skew:")
-            lines.append(_format_recs(transformation_recs))
+            lines.append(_format_recommendation_list(transformation_recs))
         else:
             lines.append("  No transformation needed for skew.")
         if outlier_recs:
             lines.append("  Outlier handling:")
-            lines.append(_format_recs(outlier_recs))
+            lines.append(_format_recommendation_list(outlier_recs))
         if scaling_rec:
             lines.append(f"  Scaling: {scaling_rec.action}")
         explanations["numeric_distributions"] = "\n".join(lines)
@@ -619,24 +633,24 @@ def explain_visualizations(
             "**Key observations:**"
         ]
         if target_profile.is_regression:
-            # We don't have skew directly, but we can mention if high missing or n_unique
             lines.append(f"  Regression target with {target_profile.n_unique} unique values.")
         else:
             lines.append(f"  Classification target with {target_profile.n_unique} classes.")
             if target_profile.class_distribution:
-                max_cls = max(target_profile.class_distribution.values())
-                min_cls = min(target_profile.class_distribution.values())
-                ratio = max_cls / min_cls if min_cls > 0 else float("inf")
-                if ratio > 5:
-                    lines.append(f"  Class imbalance detected (max/min ratio = {ratio:.1f}).")
+                vals = list(target_profile.class_distribution.values())
+                if vals:
+                    max_cls = max(vals)
+                    min_cls = min(vals)
+                    ratio = max_cls / min_cls if min_cls > 0 else float("inf")
+                    if ratio > 5:
+                        lines.append(f"  Class imbalance detected (max/min ratio = {ratio:.1f}).")
         lines.append("")
         lines.append("**Recommended actions:**")
         if target_profile.is_regression:
-            # Suggest target transformation if distribution is heavily skewed (heuristic)
             lines.append("  Consider a log or Box‑Cox transformation if the target is skewed.")
             lines.append("  Ensure the evaluation metric is appropriate (e.g., RMSLE for skewed targets).")
         else:
-            if target_profile.class_distribution and ratio > 5:
+            if ratio > 5:
                 lines.append("  Use stratified sampling during train/test split.")
                 lines.append("  Consider class weights, oversampling (SMOTE), or undersampling.")
             lines.append("  Choose metrics robust to imbalance (F1, AUC‑ROC).")
@@ -668,7 +682,7 @@ def explain_visualizations(
         lines.append("**Recommended actions:**")
         if feature_selection_recs:
             lines.append("  Handle multicollinearity:")
-            lines.append(_format_recs(feature_selection_recs))
+            lines.append(_format_recommendation_list(feature_selection_recs))
         else:
             lines.append("  No collinearity issues above threshold.")
         explanations["correlation_heatmap"] = "\n".join(lines)
@@ -680,10 +694,6 @@ def explain_visualizations(
     # ==================================================================
     # 4. Missing Values Heatmap
     # ==================================================================
-    missing_cols = _get_missing_columns(
-        pd.DataFrame()  # df not needed for explanation; we can rely on analysis data
-    )
-    # Instead, use missing report from analysis_result if available
     missing_report = analysis_result.get("missing")
     if missing_report and missing_report.total_missing > 0:
         lines = [
@@ -695,7 +705,6 @@ def explain_visualizations(
         ]
         lines.append(f"  Total missing values: {missing_report.total_missing}")
         lines.append(f"  Columns with missing: {len(missing_report.columns_with_missing)}")
-        # show top 3 columns with highest missing
         top_missing = sorted(
             missing_report.column_reports,
             key=lambda x: x.missing_percent,
@@ -707,7 +716,7 @@ def explain_visualizations(
         lines.append("**Recommended actions:**")
         if imputation_recs:
             lines.append("  Imputation strategies:")
-            lines.append(_format_recs(imputation_recs))
+            lines.append(_format_recommendation_list(imputation_recs))
         else:
             lines.append("  No imputation recommendations (may be below threshold).")
         explanations["missing_values_heatmap"] = "\n".join(lines)
@@ -738,7 +747,7 @@ def explain_visualizations(
         lines.append("**Recommended actions:**")
         if outlier_recs:
             lines.append("  Outlier treatment:")
-            lines.append(_format_recs(outlier_recs))
+            lines.append(_format_recommendation_list(outlier_recs))
         else:
             lines.append("  No outlier handling needed.")
         explanations["outlier_summary"] = "\n".join(lines)
@@ -756,8 +765,6 @@ def explain_visualizations(
             "",
             "**Key observations:**"
         ]
-        # We don't have the actual correlation values here (plot depends on df),
-        # but we can mention that it highlights linear predictors.
         lines.append("  Strong linear predictors will have tall bars.")
         lines.append("")
         lines.append("**Recommended actions:**")

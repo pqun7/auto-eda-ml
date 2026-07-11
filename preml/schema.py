@@ -1,3 +1,4 @@
+# schema.py
 """Data models (dataclasses) for preml.
 
 All classes in this module are pure data containers. They hold facts,
@@ -9,10 +10,7 @@ type‑safe objects.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
-
-import numpy as np
-import pandas as pd
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # ----------------------------------------------------------------------
@@ -280,12 +278,11 @@ class PipelineSuggestion:
 
     Attributes:
         name: A short descriptive name (e.g., 'Standard numeric pipeline').
-        steps: List of (step_name, transformer_or_estimator) tuples
-            compatible with sklearn Pipeline.
+        steps: List of (step_name, transformer_description) tuples.
         explanation: Why this pipeline was suggested.
     """
     name: str
-    steps: List[Any]  # In practice, list of (str, transformer) tuples
+    steps: List[Tuple[str, str]]   # each step is (name, description)
     explanation: str = ""
 
 

@@ -15,6 +15,7 @@ exceptions) and scikit‑learn.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
@@ -33,11 +34,14 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.model_selection import cross_validate as sk_cross_validate
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import ModelError
 from preml.schema import ModelRecommendation, TargetProfile
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -62,6 +66,18 @@ _CLASSIFICATION_METRICS: Dict[str, Callable[[np.ndarray, np.ndarray], float]] = 
     ),
 }
 
+# Canonical model name → estimator builder mapping.
+# Keys are lowercased, stripped versions of the names used in recommendations.
+_ESTIMATOR_REGISTRY_REGRESSION: Dict[str, Callable[[int], BaseEstimator]] = {
+    "linearregression": lambda rs: LinearRegression(),
+    "randomforestregressor": lambda rs: RandomForestRegressor(random_state=rs),
+}
+
+_ESTIMATOR_REGISTRY_CLASSIFICATION: Dict[str, Callable[[int], BaseEstimator]] = {
+    "logisticregression": lambda rs: LogisticRegression(max_iter=1000, random_state=rs),
+    "randomforestclassifier": lambda rs: RandomForestClassifier(random_state=rs),
+}
+
 
 def _get_task_type(target_profile: TargetProfile) -> str:
     """Determine task string from a TargetProfile."""
@@ -70,6 +86,11 @@ def _get_task_type(target_profile: TargetProfile) -> str:
     elif target_profile.is_binary:
         return "binary_classification"
     return "multiclass_classification"
+
+
+def _normalise_model_name(name: str) -> str:
+    """Convert a model name to a canonical key: lowercase, no spaces."""
+    return name.lower().replace(" ", "")
 
 
 # ---------------------------------------------------------------------------
@@ -148,18 +169,29 @@ def cross_validate(
         Scoring metric(s) compatible with
         :func:`sklearn.model_selection.cross_validate`.
     random_state : int, optional
-        Random state for reproducibility.
+        Random state used for the cross‑validation split. Note that the
+        estimator's own random state (if any) should be set separately
+        during its construction.
 
     Returns
     -------
     dict
         Mapping ``metric_name`` → list of fold scores.
     """
+    cv_splitter = cv
+    if random_state is not None and isinstance(cv, int):
+        if np.issubdtype(np.asarray(y).dtype, np.integer):
+            cv_splitter = StratifiedKFold(
+                n_splits=cv, shuffle=True, random_state=random_state
+            )
+        else:
+            cv_splitter = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+
     cv_results = sk_cross_validate(
         model,
         X,
         y,
-        cv=cv,
+        cv=cv_splitter,
         scoring=scoring,
         return_train_score=False,
         n_jobs=-1,
@@ -170,6 +202,8 @@ def cross_validate(
     for key, values in cv_results.items():
         if key.startswith("test_"):
             metric_name = key[len("test_"):]
+            if metric_name == "score" and isinstance(scoring, str):
+                metric_name = scoring
             scores[metric_name] = values.tolist()
     return scores
 
@@ -199,14 +233,13 @@ class BaselineTrainer:
     # ------------------------------------------------------------------
     # Estimator selection
     # ------------------------------------------------------------------
-    def _get_default_estimator(self, task_type: str) -> BaseEstimator:
+    @staticmethod
+    def _get_default_estimator(task_type: str) -> BaseEstimator:
         """Return a sensible default estimator for the given task."""
         if task_type == "regression":
             return LinearRegression()
         elif task_type in ("classification", "binary_classification", "multiclass_classification"):
-            return LogisticRegression(
-                max_iter=1000, random_state=self.config.random_state
-            )
+            return LogisticRegression(max_iter=1000)
         else:
             raise ModelError(f"Unsupported task type: '{task_type}'.")
 
@@ -232,27 +265,31 @@ class BaselineTrainer:
         ModelError
             If the model name cannot be mapped.
         """
-        name_lower = rec.model_name.lower().replace(" ", "")
+        key = _normalise_model_name(rec.model_name)
         rs = self.config.random_state
 
         if task_type == "regression":
-            if "linearregression" in name_lower:
-                return LinearRegression()
-            elif "randomforest" in name_lower:
-                return RandomForestRegressor(random_state=rs)
-            else:
-                raise ModelError(
-                    f"No estimator mapping for '{rec.model_name}' in regression."
+            registry = _ESTIMATOR_REGISTRY_REGRESSION
+        else:
+            registry = _ESTIMATOR_REGISTRY_CLASSIFICATION
+
+        if key in registry:
+            return registry[key](rs)
+
+        # Attempt substring fallback for flexibility
+        for reg_key, builder in registry.items():
+            if reg_key in key:
+                logger.debug(
+                    "Matched model name '%s' via substring fallback to '%s'.",
+                    rec.model_name, reg_key
                 )
-        else:  # classification
-            if "logisticregression" in name_lower:
-                return LogisticRegression(max_iter=1000, random_state=rs)
-            elif "randomforest" in name_lower:
-                return RandomForestClassifier(random_state=rs)
-            else:
-                raise ModelError(
-                    f"No estimator mapping for '{rec.model_name}' in classification."
-                )
+                return builder(rs)
+
+        raise ModelError(
+            f"No estimator mapping for '{rec.model_name}' in {task_type}. "
+            f"Available names: {list(registry.keys())}. "
+            "You may provide a custom estimator directly."
+        )
 
     # ------------------------------------------------------------------
     # Pipeline construction
@@ -404,8 +441,21 @@ class BaselineTrainer:
         Raises
         ------
         ModelError
-            If no target profile is present in the analysis.
+            If no target profile is present in the analysis or if
+            *target_col* is not a column of *df*.
         """
+        # --- Input validation ---
+        if target_col not in df.columns:
+            raise ModelError(
+                f"Target column '{target_col}' not found in DataFrame. "
+                f"Available columns: {list(df.columns[:20])}..."
+            )
+        if not isinstance(preprocessing_pipeline, ColumnTransformer):
+            raise ModelError(
+                f"Expected a ColumnTransformer for preprocessing_pipeline, "
+                f"got {type(preprocessing_pipeline)}."
+            )
+
         target_profile = analysis_result.get("target_profile")
         if not target_profile:
             raise ModelError(
@@ -424,6 +474,7 @@ class BaselineTrainer:
                     if task_type == "regression"
                     else "LogisticRegression",
                     suitability="baseline",
+                    reason="Default baseline model (no recommendation available).",
                 )
             ]
 
@@ -432,8 +483,15 @@ class BaselineTrainer:
 
         results: List[Dict[str, Any]] = []
         for rec in recs:
-            # rec is a ModelRecommendation instance
-            estimator = self._estimator_from_recommendation(rec, task_type)
+            try:
+                estimator = self._estimator_from_recommendation(rec, task_type)
+            except ModelError:
+                logger.warning(
+                    "Skipping model '%s' – no estimator mapping found.",
+                    rec.model_name,
+                )
+                continue
+
             pipeline = self.build_model_pipeline(
                 preprocessing_pipeline, task_type, estimator
             )
@@ -441,4 +499,5 @@ class BaselineTrainer:
                 pipeline, X, y, task_type, cv=cv
             )
             results.append({"model_name": rec.model_name, **eval_out})
+
         return results

@@ -22,9 +22,10 @@ responsible for a single domain concern:
 """
 
 __version__ = "0.1.0"
+# TODO: Update author before release
 __author__ = "Your Name <your.email@example.com>"
 
-# Expose the most commonly used classes at package level
+# Expose the most commonly used classes and convenience functions
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import (
     MLToolkitError,
@@ -54,8 +55,10 @@ from preml.schema import (
     PipelineSuggestion,
     ModelRecommendation,
 )
+from preml.eda import quick_eda
 
 __all__ = [
+    # Configuration
     "MLToolkitConfig",
     "default_config",
     # Exceptions
@@ -84,4 +87,6 @@ __all__ = [
     "Recommendation",
     "PipelineSuggestion",
     "ModelRecommendation",
+    # Convenience
+    "quick_eda",
 ]

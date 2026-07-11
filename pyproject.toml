@@ -3,11 +3,11 @@ requires = ["setuptools>=64.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "preml"
-version = "0.1.0"
-description = "Production‑ready machine learning toolkit for EDA, preprocessing, and modelling."
-readme = "README.md"
-license = {text = "MIT"}
+name = "pypreml"
+version = "0.1.2"
+description = "Production-ready machine learning toolkit for EDA, preprocessing, and modelling."
+readme = "Usage Guide.md"
+license = { text = "MIT" }
 authors = [
     {name = "Ali Nazer", email = "alinazer30@gmail.com"}
 ]

@@ -1,3 +1,4 @@
+# config.py
 """Central configuration module for preml.
 
 This module defines all tunable parameters, thresholds, and defaults
@@ -6,8 +7,8 @@ without creating circular dependencies and does not rely on any
 heavy external packages (only the standard library).
 """
 
-from dataclasses import dataclass, field
-from typing import Literal, Optional
+from dataclasses import dataclass
+from typing import Literal, Tuple
 
 
 @dataclass
@@ -28,8 +29,6 @@ class MLToolkitConfig:
             which a pair of features is flagged as highly correlated.
         skewness_threshold: Absolute skewness above which a distribution
             is considered heavily skewed.
-        kurtosis_threshold: Absolute kurtosis above which a distribution
-            is considered heavily tailed (not currently used).
         cv_threshold: Coefficient of Variation above which a feature
             is marked as highly dispersed.
         zero_percent_threshold: Percentage of zeros in a numeric column
@@ -59,6 +58,7 @@ class MLToolkitConfig:
     # Missingness & Data Quality
     # ----------------------------------------------------------------
     missing_threshold: float = 0.4
+    low_cardinality_threshold: int = 10
     high_cardinality_threshold: int = 50
     max_unique_for_categorical_like: int = 15
 
@@ -67,7 +67,6 @@ class MLToolkitConfig:
     # ----------------------------------------------------------------
     correlation_threshold: float = 0.9
     skewness_threshold: float = 1.5
-    kurtosis_threshold: float = 4.0        # Not actively used
     cv_threshold: float = 2.0
     zero_percent_threshold: float = 50.0
     negative_percent_threshold: float = 5.0
@@ -75,6 +74,7 @@ class MLToolkitConfig:
     # ----------------------------------------------------------------
     # Outlier Detection
     # ----------------------------------------------------------------
+    outlier_threshold_percent: float = 5.0
     outlier_method: Literal["iqr", "zscore"] = "iqr"
     iqr_multiplier: float = 1.5
     zscore_threshold: float = 3.0
@@ -95,16 +95,12 @@ class MLToolkitConfig:
     max_plot_cols: int = 20
     plot_style: str = "whitegrid"
     color_palette: str = "muted"
-    figure_size: tuple = (12, 6)
+    figure_size: Tuple[int, int] = (12, 6)
 
     # ----------------------------------------------------------------
     # Reproducibility
     # ----------------------------------------------------------------
     random_state: int = 42
-
-    # ----------------------------------------------------------------
-    # Additional settings may be added in the future.
-    # ----------------------------------------------------------------
 
 
 # ----------------------------------------------------------------------

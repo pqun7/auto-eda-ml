@@ -1,3 +1,4 @@
+# feature_engineering.py
 """
 Feature engineering suggestion layer — generates proposals for new
 features based solely on statistical evidence, never on column names.
@@ -12,10 +13,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from preml.config import MLToolkitConfig, default_config
+from preml.exceptions import DataValidationError
 from preml.schema import (
     FeatureProfile,
     Recommendation,
@@ -23,6 +25,7 @@ from preml.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -40,7 +43,7 @@ def _make_recommendation(
     alternatives: Optional[List[str]] = None,
     risks: Optional[List[str]] = None,
 ) -> Recommendation:
-    """Build a Recommendation with a list of Evidence."""
+    """Build a feature‑engineering Recommendation with a list of Evidence."""
     evidence = [Evidence(reason=r, statistics=stats) for r in reasons]
     return Recommendation(
         category="feature_engineering",
@@ -67,6 +70,11 @@ class FeatureEngineering:
         to compute exact cardinalities for feature crossing.
     config : MLToolkitConfig, optional
         Configuration thresholds (skewness, correlation, etc.).
+
+    Raises
+    ------
+    DataValidationError
+        If `analysis_result` is not a dictionary or is missing required keys.
     """
 
     def __init__(
@@ -75,6 +83,11 @@ class FeatureEngineering:
         df: Optional[pd.DataFrame] = None,
         config: Optional[MLToolkitConfig] = None,
     ) -> None:
+        if not isinstance(analysis_result, dict):
+            raise DataValidationError(
+                "analysis_result must be a dictionary (the output of EDAAnalyzer.run())."
+            )
+
         self.analysis = analysis_result
         self.df = df
         self.config = config or default_config
@@ -96,10 +109,11 @@ class FeatureEngineering:
             (p.feature_b, p.feature_a) for p in self.correlation_pairs
         )
 
-        # Safe configuration thresholds
-        self.skewness_threshold = getattr(self.config, "skewness_threshold", 1.0)
-        self.max_unique_for_categorical_like = getattr(
-            self.config, "max_unique_for_categorical_like", 10
+        # Configuration thresholds – use direct attribute access now that the
+        # config dataclass is guaranteed to have these fields.
+        self.skewness_threshold: float = self.config.skewness_threshold
+        self.max_unique_for_categorical_like: int = (
+            self.config.max_unique_for_categorical_like
         )
 
     def suggest_features(self) -> List[Recommendation]:
@@ -151,30 +165,32 @@ class FeatureEngineering:
                 base_confidence = 0.5
                 # Raise confidence if coefficients of variation are similar
                 if (
-                    prof_a.cv is not None and prof_b.cv is not None
+                    prof_a.cv is not None
+                    and prof_b.cv is not None
                     and not (np.isnan(prof_a.cv) or np.isnan(prof_b.cv))
                     and abs(prof_a.cv - prof_b.cv) < 0.5
                 ):
                     base_confidence = 0.65
 
-                stats = {
+                stats: Dict[str, Any] = {
                     f"{col_a}_median": prof_a.median,
                     f"{col_b}_median": prof_b.median,
                     f"{col_a}_cv": prof_a.cv,
                     f"{col_b}_cv": prof_b.cv,
                 }
+                reason = (
+                    f"Both columns are numeric with non‑zero medians and positive values, "
+                    f"suggesting a possible relative measure."
+                )
+                if base_confidence > 0.5:
+                    reason += (
+                        f" Similar CV ({prof_a.cv:.2f} vs {prof_b.cv:.2f}) strengthens the case."
+                    )
                 recs.append(
                     _make_recommendation(
                         action=f"Create ratio feature: {col_a} / {col_b} (or vice versa).",
                         confidence=base_confidence,
-                        reasons=[
-                            f"Both columns are numeric with non‑zero medians and positive values, "
-                            f"suggesting a possible relative measure."
-                            + (
-                                f" Similar CV ({prof_a.cv:.2f} vs {prof_b.cv:.2f}) strengthens the case."
-                                if base_confidence > 0.5 else ""
-                            )
-                        ],
+                        reasons=[reason],
                         stats=stats,
                         alternatives=["Consider difference or product instead."],
                         risks=["Ratio may become unbounded or create division‑by‑zero in edge cases."],
@@ -203,7 +219,7 @@ class FeatureEngineering:
                 if prof_a.std == 0 or prof_b.std == 0:
                     continue  # constant column, interaction useless
 
-                stats = {
+                stats: Dict[str, Any] = {
                     f"{col_a}_std": prof_a.std,
                     f"{col_b}_std": prof_b.std,
                 }

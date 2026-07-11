@@ -82,20 +82,13 @@ class StatisticsEngine:
             exclude=[np.number]
         ).columns.tolist()
 
-        # Safe defaults for all configurable parameters (consistent with
-        # the recommendation engine's approach).
-        self.iqr_multiplier = getattr(self.config, "iqr_multiplier", 1.5)
-        self.zscore_threshold = getattr(self.config, "zscore_threshold", 3.0)
-        self.outlier_method = getattr(self.config, "outlier_method", "iqr")
-        self.constant_variance_threshold = getattr(
-            self.config, "constant_variance_threshold", 1e-8
-        )
-        self.max_unique_for_categorical_like = getattr(
-            self.config, "max_unique_for_categorical_like", 10
-        )
-        self.correlation_threshold = getattr(
-            self.config, "correlation_threshold", 0.7
-        )
+        # Store config values directly for performance and clarity.
+        self.iqr_multiplier = self.config.iqr_multiplier
+        self.zscore_threshold = self.config.zscore_threshold
+        self.outlier_method = self.config.outlier_method
+        self.constant_variance_threshold = self.config.constant_variance_threshold
+        self.max_unique_for_categorical_like = self.config.max_unique_for_categorical_like
+        self.correlation_threshold = self.config.correlation_threshold
 
     # ------------------------------------------------------------------
     # Dataset‑level checks
@@ -108,7 +101,7 @@ class StatisticsEngine:
         DatasetMetadata
         """
         n_rows, n_columns = self.df.shape
-        memory_mb = self.df.memory_usage(deep=True).sum() / (1024 ** 2)
+        memory_mb = self.df.memory_usage(deep=True).sum() / (1024**2)
         col_types = self.df.dtypes.value_counts().to_dict()
         # Convert dtype objects to string for serialisability
         col_types = {str(k): v for k, v in col_types.items()}
@@ -127,7 +120,9 @@ class StatisticsEngine:
         DuplicateReport
         """
         n_duplicates = self.df.duplicated().sum()
-        dup_percent = 100.0 * n_duplicates / len(self.df) if len(self.df) > 0 else 0.0
+        dup_percent = (
+            100.0 * n_duplicates / len(self.df) if len(self.df) > 0 else 0.0
+        )
         sample_idx = (
             self.df[self.df.duplicated(keep=False)].index[:100].tolist()
             if n_duplicates > 0
@@ -146,7 +141,6 @@ class StatisticsEngine:
         -------
         InfiniteReport
         """
-        # Using isin is both simpler and faster than replace→isna.
         inf_mask = self.df.isin([np.inf, -np.inf])
         inf_counts = inf_mask.sum()
         cols_with_inf = inf_counts[inf_counts > 0]
@@ -219,7 +213,7 @@ class StatisticsEngine:
 
     def _zscore_outliers(
         self, series: pd.Series
-    ) -> Tuple[None, None, pd.Series]:
+    ) -> Tuple[Optional[float], Optional[float], pd.Series]:
         """Z‑score based outlier detection.
 
         Parameters
@@ -282,7 +276,7 @@ class StatisticsEngine:
     # Distribution profiles (numeric / categorical)
     # ------------------------------------------------------------------
     @staticmethod
-    def _safe_round(value: Any, ndigits: int = 4) -> Any:
+    def _safe_round(value: Any, ndigits: int = 4) -> float:
         """Round a value safely, returning NaN on failure."""
         try:
             return round(float(value), ndigits)
@@ -304,10 +298,7 @@ class StatisticsEngine:
                 max=np.nan,
             )
 
-        # Compute all required percentiles in one pass for performance.
-        q_vals = series.quantile(
-            [0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99]
-        )
+        q_vals = series.quantile([0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99])
         percentiles: Dict[str, float] = {
             "1%": self._safe_round(q_vals[0.01], 4),
             "5%": self._safe_round(q_vals[0.05], 4),
@@ -323,7 +314,6 @@ class StatisticsEngine:
         std_val = series.std()
         cv_val = (std_val / mean_val) if mean_val != 0 else np.nan
 
-        # Skewness & kurtosis (safe fallback for constant columns)
         try:
             sk = series.skew()
         except Exception:
@@ -337,9 +327,7 @@ class StatisticsEngine:
         neg_pct = (series < 0).mean() * 100
 
         unique_count = series.nunique()
-        is_categorical_like = (
-            unique_count <= self.max_unique_for_categorical_like
-        )
+        is_categorical_like = unique_count <= self.max_unique_for_categorical_like
 
         return NumericDistributionProfile(
             column=col,
@@ -374,11 +362,10 @@ class StatisticsEngine:
             )
 
         unique_count = series.nunique()
-        top_df = series.value_counts().head(5).reset_index()
-        top_df.columns = ["category", "count"]   # safe even if col == "index"
+        top_series = series.value_counts().head(5)
         top_categories: List[Dict[str, Any]] = [
-            {"category": row["category"], "count": int(row["count"])}
-            for row in top_df.to_dict(orient="records")
+            {"category": idx, "count": int(cnt)}
+            for idx, cnt in top_series.items()
         ]
         mode = series.mode().iloc[0] if not series.mode().empty else None
 
@@ -400,21 +387,22 @@ class StatisticsEngine:
         """
         profiles: List[FeatureProfile] = []
 
-        # Variance thresholds for constant detection
-        variances = self.df[self._numeric_cols].var(numeric_only=True)
-        quasi_const_mask = variances < self.constant_variance_threshold
-        quasi_const = variances[quasi_const_mask].index.tolist()
+        if self._numeric_cols:
+            variances = self.df[self._numeric_cols].var(numeric_only=False)
+            quasi_const_mask = variances < self.constant_variance_threshold
+            quasi_const = variances[quasi_const_mask].index.tolist()
+        else:
+            quasi_const = []
 
-        # Constant columns (nunique <= 1) across all columns
         const_cols = self.df.columns[self.df.nunique() <= 1].tolist()
 
         for col in self.df.columns:
             if col == self.target:
-                continue  # target handled separately
+                continue
 
             dtype = str(self.df[col].dtype)
             is_const = col in const_cols
-            is_quasi = col in quasi_const
+            is_quasi = col in quasi_const if col in self._numeric_cols else False
 
             if pd.api.types.is_numeric_dtype(self.df[col]):
                 num_profile = self._compute_numeric_profile(col)
@@ -492,17 +480,12 @@ class StatisticsEngine:
         dtype = str(series.dtype)
 
         if pd.api.types.is_numeric_dtype(series):
-            # Determine if regression or binary classification
             unique_vals = series.dropna().nunique()
             is_binary = unique_vals == 2
-            # A continuous numeric target is considered regression, but
-            # if it has very few unique values (< 20) it might be classification.
-            is_regression = unique_vals >= 20  # heuristic
+            is_regression = unique_vals >= 20
             class_dist = {}
             if not is_regression:
-                class_dist = (
-                    series.value_counts().sort_index().to_dict()
-                )
+                class_dist = series.value_counts().sort_index().to_dict()
             return TargetProfile(
                 column=self.target,
                 dtype=dtype,
@@ -514,7 +497,6 @@ class StatisticsEngine:
                 class_distribution=class_dist,
             )
         else:
-            # Categorical target
             unique_vals = series.nunique()
             class_dist = series.value_counts().to_dict()
             return TargetProfile(

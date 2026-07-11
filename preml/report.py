@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from typing import Any, Dict, List, Optional
 
 import matplotlib.figure
@@ -37,6 +38,8 @@ from preml.visualization import (
     plot_target_correlations,
     plot_target_distribution,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Embedded CSS for HTML reports
@@ -115,10 +118,18 @@ class ReportGenerator:
         self.infinite = analysis_result.get("infinite")
         self.missing = analysis_result.get("missing")
         self.outliers: List[OutlierReport] = analysis_result.get("outliers", [])
-        self.feature_profiles: List[FeatureProfile] = analysis_result.get("feature_profiles", [])
-        self.correlation_pairs: List[CorrelationPair] = analysis_result.get("correlation_pairs", [])
-        self.target_profile: Optional[TargetProfile] = analysis_result.get("target_profile")
-        self.recommendations: Dict[str, Any] = analysis_result.get("recommendations", {})
+        self.feature_profiles: List[FeatureProfile] = analysis_result.get(
+            "feature_profiles", []
+        )
+        self.correlation_pairs: List[CorrelationPair] = analysis_result.get(
+            "correlation_pairs", []
+        )
+        self.target_profile: Optional[TargetProfile] = analysis_result.get(
+            "target_profile"
+        )
+        self.recommendations: Dict[str, Any] = analysis_result.get(
+            "recommendations", {}
+        )
         self.quality_score = analysis_result.get("data_quality_score", 0.0)
         self.quality_notes: List[str] = analysis_result.get("data_quality_notes", [])
 
@@ -135,11 +146,13 @@ class ReportGenerator:
         if not self.recommendations:
             try:
                 from preml.recommendation_engine import RecommendationEngine
-                engine = RecommendationEngine(config=self.config, enable_feature_engineering=False)
+
+                engine = RecommendationEngine(
+                    config=self.config, enable_feature_engineering=False
+                )
                 self.recommendations = engine.generate_recommendations(self.analysis)
             except Exception:
-                # If recommendation generation fails, leave empty
-                pass
+                logger.exception("Failed to generate recommendations on the fly.")
         self._recommendations_ensured = True
 
     # ------------------------------------------------------------------
@@ -150,11 +163,23 @@ class ReportGenerator:
 
         # Missing values
         if self.missing and self.missing.total_missing > 0:
-            pct = (self.missing.total_missing / (self.metadata.n_rows * self.metadata.n_columns)) * 100 if self.metadata else 0
+            pct = (
+                (
+                    self.missing.total_missing
+                    / (self.metadata.n_rows * self.metadata.n_columns)
+                )
+                * 100
+                if self.metadata
+                else 0
+            )
             if pct > 5:
-                findings.append(f"High missing data ({pct:.1f}% of cells). Imputation or column removal is recommended.")
+                findings.append(
+                    f"High missing data ({pct:.1f}% of cells). Imputation or column removal is recommended."
+                )
             else:
-                findings.append(f"Minor missing data ({pct:.1f}% of cells). Imputation should be straightforward.")
+                findings.append(
+                    f"Minor missing data ({pct:.1f}% of cells). Imputation should be straightforward."
+                )
 
         # Outliers
         outlier_cols = [o for o in self.outliers if o.outlier_count > 0]
@@ -162,42 +187,60 @@ class ReportGenerator:
             high_outlier = [o for o in outlier_cols if o.outlier_percent > 5]
             if high_outlier:
                 cols = ", ".join(o.column for o in high_outlier[:3])
-                findings.append(f"Significant outliers in {cols} (and others). Consider robust scaling or capping.")
+                findings.append(
+                    f"Significant outliers in {cols} (and others). Consider robust scaling or capping."
+                )
             else:
-                findings.append("Outliers are present but within acceptable limits.")
+                findings.append(
+                    "Outliers are present but within acceptable limits."
+                )
 
         # Correlations
         if self.correlation_pairs:
-            strong = [p for p in self.correlation_pairs if abs(p.coefficient) > 0.9]
+            strong = [
+                p for p in self.correlation_pairs if abs(p.coefficient) > 0.9
+            ]
             if strong:
                 pairs = ", ".join(f"{p.feature_a}/{p.feature_b}" for p in strong[:3])
-                findings.append(f"Very high correlation (|r|>0.9) between {pairs}. Multicollinearity may affect linear models.")
+                findings.append(
+                    f"Very high correlation (|r|>0.9) between {pairs}. Multicollinearity may affect linear models."
+                )
 
         # Constant / quasi-constant features
         const = [p.column for p in self.feature_profiles if p.is_constant]
         quasi = [p.column for p in self.feature_profiles if p.is_quasi_constant]
         if const or quasi:
-            findings.append(f"Dataset contains {len(const)} constant and {len(quasi)} quasi-constant features; they carry no information and should be dropped.")
+            findings.append(
+                f"Dataset contains {len(const)} constant and {len(quasi)} quasi-constant features; they carry no information and should be dropped."
+            )
 
         # Target
         if self.target_profile:
-            if self.target_profile.is_regression:
-                # just mention if many unique values
-                pass
-            else:
-                if self.target_profile.n_unique == 2 and self.target_profile.is_binary:
-                    # check imbalance
+            if not self.target_profile.is_regression:
+                if (
+                    self.target_profile.n_unique == 2
+                    and self.target_profile.is_binary
+                ):
                     class_dist = self.target_profile.class_distribution
                     if class_dist:
                         vals = list(class_dist.values())
-                        if min(vals)/max(vals) < 0.3:
-                            findings.append("Target class imbalance detected. Use stratified sampling and consider class weights.")
+                        max_val = max(vals)
+                        if max_val > 0 and min(vals) / max_val < 0.3:
+                            findings.append(
+                                "Target class imbalance detected. Use stratified sampling and consider class weights."
+                            )
                 elif self.target_profile.n_unique > 10:
-                    findings.append("Multi‑class target with many classes; evaluate if grouping is possible.")
+                    findings.append(
+                        "Multi‑class target with many classes; evaluate if grouping is possible."
+                    )
 
         # Infinity
         if self.infinite and self.infinite.columns_with_inf:
-            findings.append("Infinite values found in columns: " + ", ".join(self.infinite.columns_with_inf[:3]) + ". Replace or remove them.")
+            findings.append(
+                "Infinite values found in columns: "
+                + ", ".join(self.infinite.columns_with_inf[:3])
+                + ". Replace or remove them."
+            )
 
         return findings
 
@@ -206,9 +249,6 @@ class ReportGenerator:
     # ------------------------------------------------------------------
     def _score_breakdown(self) -> str:
         parts = []
-        # Assume the quality score starts at 100 and deductions are made
-        # We'll create a human-readable text based on quality_notes and thresholds.
-        # This is illustrative; real implementation would use the actual scoring logic.
         if self.quality_score >= 70:
             status = "Good"
         elif self.quality_score >= 40:
@@ -221,6 +261,30 @@ class ReportGenerator:
             for note in self.quality_notes:
                 parts.append(f"  • {note}")
         return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Common helper: iterate recommendation categories
+    # ------------------------------------------------------------------
+    _RECOMMENDATION_CATEGORIES = [
+        "imputation",
+        "outlier_handling",
+        "transformation",
+        "scaling",
+        "encoding",
+        "feature_engineering",
+        "feature_selection",
+    ]
+
+    def _iter_recommendation_items(
+        self,
+    ) -> List[tuple]:
+        """Yield (category, list of normalized Recommendation objects)."""
+        result = []
+        for cat in self._RECOMMENDATION_CATEGORIES:
+            recs = normalize_recommendation_items(self.recommendations.get(cat))
+            if recs:
+                result.append((cat, recs))
+        return result
 
     # ------------------------------------------------------------------
     # Plain‑text report (enhanced)
@@ -264,8 +328,10 @@ class ReportGenerator:
         # Duplicates
         if self.duplicates:
             lines.append("[Duplicates]")
-            lines.append(f"  Total duplicates: {self.duplicates.total_duplicates} "
-                         f"({self.duplicates.duplicate_percent:.2f}%)")
+            lines.append(
+                f"  Total duplicates: {self.duplicates.total_duplicates} "
+                f"({self.duplicates.duplicate_percent:.2f}%)"
+            )
             lines.append("")
 
         # Infinite
@@ -282,10 +348,13 @@ class ReportGenerator:
             lines.append("  Top columns:")
             top_miss = sorted(
                 self.missing.column_reports,
-                key=lambda x: x.missing_percent, reverse=True
+                key=lambda x: x.missing_percent,
+                reverse=True,
             )[:5]
             for col_rpt in top_miss:
-                lines.append(f"    {col_rpt.column}: {col_rpt.missing_percent:.2f}%")
+                lines.append(
+                    f"    {col_rpt.column}: {col_rpt.missing_percent:.2f}%"
+                )
             lines.append("")
 
         # Outliers
@@ -294,16 +363,22 @@ class ReportGenerator:
             if outlier_cols:
                 lines.append("[Outliers (IQR)]")
                 for o in outlier_cols[:10]:
-                    lines.append(f"  {o.column}: {o.outlier_count} ({o.outlier_percent:.2f}%)")
+                    lines.append(
+                        f"  {o.column}: {o.outlier_count} ({o.outlier_percent:.2f}%)"
+                    )
                 if len(outlier_cols) > 10:
-                    lines.append(f"  ... and {len(outlier_cols)-10} more columns.")
+                    lines.append(
+                        f"  ... and {len(outlier_cols)-10} more columns."
+                    )
                 lines.append("")
 
         # Feature profiles summary
         if self.feature_profiles:
             lines.append("[Feature Profiles Summary]")
             const = [p.column for p in self.feature_profiles if p.is_constant]
-            quasi = [p.column for p in self.feature_profiles if p.is_quasi_constant]
+            quasi = [
+                p.column for p in self.feature_profiles if p.is_quasi_constant
+            ]
             if const:
                 lines.append(f"  Constant columns: {', '.join(const)}")
             if quasi:
@@ -314,9 +389,13 @@ class ReportGenerator:
         if self.correlation_pairs:
             lines.append("[Highly Correlated Feature Pairs]")
             for pair in self.correlation_pairs[:10]:
-                lines.append(f"  {pair.feature_a} vs {pair.feature_b}: r={pair.coefficient:.2f}")
+                lines.append(
+                    f"  {pair.feature_a} vs {pair.feature_b}: r={pair.coefficient:.2f}"
+                )
             if len(self.correlation_pairs) > 10:
-                lines.append(f"  ... and {len(self.correlation_pairs)-10} more pairs.")
+                lines.append(
+                    f"  ... and {len(self.correlation_pairs)-10} more pairs."
+                )
             lines.append("")
 
         # Recommendations
@@ -324,15 +403,16 @@ class ReportGenerator:
             lines.append("[Recommendations Summary]")
             try:
                 from preml.recommendation_engine import RecommendationEngine
+
                 summary_text = RecommendationEngine.summarize(self.recommendations)
                 lines.append(summary_text)
             except Exception:
-                # fallback to simple listing
-                for category in ["imputation", "outlier_handling", "transformation",
-                                 "scaling", "encoding", "feature_engineering", "feature_selection"]:
-                    recs = normalize_recommendation_items(self.recommendations.get(category))
+                logger.warning(
+                    "Failed to summarize recommendations; falling back to list."
+                )
+                for cat, recs in self._iter_recommendation_items():
                     for r in recs[:3]:
-                        lines.append(f"  [{category}] {r.action}")
+                        lines.append(f"  [{cat}] {r.action}")
             lines.append("")
 
         # Models
@@ -379,8 +459,17 @@ class ReportGenerator:
 
         # Data quality
         md.append("## Data Quality\n")
-        score_color = "green" if self.quality_score >= 70 else "orange" if self.quality_score >= 40 else "red"
-        md.append(f"**Score:** <span style='color:{score_color};font-size:1.5em;'>{self.quality_score:.1f}/100</span>\n")
+        score_color = (
+            "green"
+            if self.quality_score >= 70
+            else "orange"
+            if self.quality_score >= 40
+            else "red"
+        )
+        md.append(
+            f"**Score:** <span style='color:{score_color};font-size:1.5em;'>"
+            f"{self.quality_score:.1f}/100</span>\n"
+        )
         if self.quality_notes:
             for note in self.quality_notes:
                 md.append(f"- {note}")
@@ -389,7 +478,10 @@ class ReportGenerator:
         # Duplicates, Infinite, Missing, Outliers (tables)
         if self.duplicates:
             md.append("## Duplicates\n")
-            md.append(f"Total duplicate rows: {self.duplicates.total_duplicates} ({self.duplicates.duplicate_percent:.2f}%)\n")
+            md.append(
+                f"Total duplicate rows: {self.duplicates.total_duplicates} "
+                f"({self.duplicates.duplicate_percent:.2f}%)\n"
+            )
         if self.infinite and self.infinite.columns_with_inf:
             md.append("## Infinite Values\n")
             md.append("| Column | Count |")
@@ -403,7 +495,10 @@ class ReportGenerator:
             md.append("| Column | Missing Count | Missing % |")
             md.append("|--------|---------------|-----------|")
             for col_rpt in self.missing.column_reports:
-                md.append(f"| {col_rpt.column} | {col_rpt.missing_count} | {col_rpt.missing_percent:.2f}% |")
+                md.append(
+                    f"| {col_rpt.column} | {col_rpt.missing_count} | "
+                    f"{col_rpt.missing_percent:.2f}% |"
+                )
             md.append("")
         if self.outliers:
             outlier_cols = [o for o in self.outliers if o.outlier_count > 0]
@@ -412,19 +507,28 @@ class ReportGenerator:
                 md.append("| Column | Outlier Count | Outlier % |")
                 md.append("|--------|---------------|-----------|")
                 for o in outlier_cols:
-                    md.append(f"| {o.column} | {o.outlier_count} | {o.outlier_percent:.2f}% |")
+                    md.append(
+                        f"| {o.column} | {o.outlier_count} | "
+                        f"{o.outlier_percent:.2f}% |"
+                    )
                 md.append("")
 
         # Feature profiles
         if self.feature_profiles:
             const = [p.column for p in self.feature_profiles if p.is_constant]
-            quasi = [p.column for p in self.feature_profiles if p.is_quasi_constant]
+            quasi = [
+                p.column for p in self.feature_profiles if p.is_quasi_constant
+            ]
             if const or quasi:
                 md.append("## Feature Status\n")
                 if const:
-                    md.append(f"**Constant columns:** {', '.join(const)}")
+                    md.append(
+                        f"**Constant columns:** {', '.join(const)}"
+                    )
                 if quasi:
-                    md.append(f"**Quasi-constant columns:** {', '.join(quasi)}")
+                    md.append(
+                        f"**Quasi-constant columns:** {', '.join(quasi)}"
+                    )
                 md.append("")
 
         # Correlations
@@ -433,35 +537,43 @@ class ReportGenerator:
             md.append("| Feature A | Feature B | Coefficient |")
             md.append("|-----------|-----------|-------------|")
             for pair in self.correlation_pairs:
-                md.append(f"| {pair.feature_a} | {pair.feature_b} | {pair.coefficient:.2f} |")
+                md.append(
+                    f"| {pair.feature_a} | {pair.feature_b} | "
+                    f"{pair.coefficient:.2f} |"
+                )
             md.append("")
 
-        # Recommendations (using summarizer for better formatting)
+        # Recommendations (use fenced code block for plain‑text summary)
         if self.recommendations:
             md.append("## Recommendations\n")
             try:
                 from preml.recommendation_engine import RecommendationEngine
+
                 summary = RecommendationEngine.summarize(self.recommendations)
-                # Convert the plain-text summary to markdown (basic)
-                summary = summary.replace("=" * 60, "---\n")
+                md.append("```text")
                 md.append(summary)
+                md.append("```")
             except Exception:
-                # fallback to simple list
-                for cat in ["imputation", "outlier_handling", "transformation",
-                            "scaling", "encoding", "feature_engineering", "feature_selection"]:
-                    recs = normalize_recommendation_items(self.recommendations.get(cat))
-                    if recs:
-                        md.append(f"### {cat.replace('_', ' ').title()}\n")
-                        for r in recs:
-                            md.append(f"- **{r.action}** (confidence: {r.confidence:.2f})")
-                md.append("")
+                logger.warning(
+                    "Failed to summarize recommendations; falling back to list."
+                )
+                for cat, recs in self._iter_recommendation_items():
+                    md.append(f"### {cat.replace('_', ' ').title()}\n")
+                    for r in recs:
+                        md.append(
+                            f"- **{r.action}** (confidence: {r.confidence:.2f})"
+                        )
+                    md.append("")
+            md.append("")
 
         # Models
         model_recs = self.recommendations.get("models", [])
         if model_recs:
             md.append("## Recommended Models\n")
             for m in model_recs:
-                md.append(f"- **{m.model_name}** ({m.suitability}): {m.reason}")
+                md.append(
+                    f"- **{m.model_name}** ({m.suitability}): {m.reason}"
+                )
             md.append("")
 
         return "\n".join(md)
@@ -469,6 +581,23 @@ class ReportGenerator:
     # ------------------------------------------------------------------
     # HTML report (enriched with explanations)
     # ------------------------------------------------------------------
+    def _embed_plot_with_caption(
+        self,
+        html_parts: List[str],
+        fig,
+        caption_key: str,
+        section_title: str,
+        explanations: Dict[str, str],
+    ) -> None:
+        """Append an HTML section with an optional figure and caption."""
+        if fig is not None:
+            html_parts.append(f"<h3>{section_title}</h3>")
+            if caption_key in explanations:
+                html_parts.append(
+                    f"<div class='caption'>{explanations[caption_key]}</div>"
+                )
+            html_parts.append(_fig_to_html(fig))
+
     def generate_html(self, embed_plots: bool = True) -> str:
         """Generate a self‑contained HTML EDA report with insights.
 
@@ -486,27 +615,46 @@ class ReportGenerator:
         self._ensure_recommendations()
 
         # Prepare explanations dictionary (once)
+        explanations: Dict[str, str] = {}
         try:
-            explanations = explain_visualizations(self.analysis, recommendations=self.recommendations, config=self.config)
+            explanations = explain_visualizations(
+                self.analysis,
+                recommendations=self.recommendations,
+                config=self.config,
+            )
         except Exception:
-            explanations = {}
+            logger.warning(
+                "Failed to generate visualization explanations; continuing without them.",
+                exc_info=True,
+            )
 
-        html_parts = []
+        html_parts: List[str] = []
         html_parts.append("<!DOCTYPE html>")
-        html_parts.append("<html><head><meta charset='utf-8'><title>EDA Report</title>")
+        html_parts.append(
+            "<html><head><meta charset='utf-8'><title>EDA Report</title>"
+        )
         html_parts.append(f"<style>{_REPORT_CSS}</style></head><body>")
 
         # Title & Quality Score
         html_parts.append("<h1>PreML – EDA Report</h1>")
-        score_class = "good" if self.quality_score >= 70 else "moderate" if self.quality_score >= 40 else "warning"
+        score_class = (
+            "good"
+            if self.quality_score >= 70
+            else "moderate"
+            if self.quality_score >= 40
+            else "warning"
+        )
         html_parts.append(
-            f"<p>Data Quality Score: <span class='quality-score {score_class}'>{self.quality_score:.1f}</span>/100</p>"
+            f"<p>Data Quality Score: <span class='quality-score {score_class}'>"
+            f"{self.quality_score:.1f}</span>/100</p>"
         )
 
         # Key Findings
         findings = self._key_findings()
         if findings:
-            html_parts.append("<div class='summary-box'><h2>Key Findings</h2><ul>")
+            html_parts.append(
+                "<div class='summary-box'><h2>Key Findings</h2><ul>"
+            )
             for f in findings:
                 html_parts.append(f"<li>{f}</li>")
             html_parts.append("</ul></div>")
@@ -515,9 +663,15 @@ class ReportGenerator:
         if self.metadata:
             html_parts.append("<h2>Dataset Overview</h2>")
             html_parts.append("<ul>")
-            html_parts.append(f"<li><strong>Rows:</strong> {self.metadata.n_rows}</li>")
-            html_parts.append(f"<li><strong>Columns:</strong> {self.metadata.n_columns}</li>")
-            html_parts.append(f"<li><strong>Memory:</strong> {self.metadata.memory_mb:.2f} MB</li>")
+            html_parts.append(
+                f"<li><strong>Rows:</strong> {self.metadata.n_rows}</li>"
+            )
+            html_parts.append(
+                f"<li><strong>Columns:</strong> {self.metadata.n_columns}</li>"
+            )
+            html_parts.append(
+                f"<li><strong>Memory:</strong> {self.metadata.memory_mb:.2f} MB</li>"
+            )
             html_parts.append("</ul>")
 
         # Quality Score Breakdown
@@ -529,126 +683,217 @@ class ReportGenerator:
         # Duplicates, Infinite, Missing, Outliers (tables)
         if self.duplicates and self.duplicates.total_duplicates > 0:
             html_parts.append("<h2>Duplicates</h2>")
-            html_parts.append(f"<p>Total duplicates: {self.duplicates.total_duplicates} ({self.duplicates.duplicate_percent:.2f}%)</p>")
+            html_parts.append(
+                f"<p>Total duplicates: {self.duplicates.total_duplicates} "
+                f"({self.duplicates.duplicate_percent:.2f}%)</p>"
+            )
         if self.infinite and self.infinite.columns_with_inf:
-            html_parts.append("<h2>Infinite Values</h2><table><tr><th>Column</th><th>Count</th></tr>")
+            html_parts.append(
+                "<h2>Infinite Values</h2><table><tr><th>Column</th><th>Count</th></tr>"
+            )
             for col, cnt in self.infinite.counts.items():
                 html_parts.append(f"<tr><td>{col}</td><td>{cnt}</td></tr>")
             html_parts.append("</table>")
         if self.missing and self.missing.total_missing > 0:
             html_parts.append("<h2>Missing Values</h2>")
-            html_parts.append(f"<p>Total missing cells: {self.missing.total_missing}</p>")
-            html_parts.append("<table><tr><th>Column</th><th>Missing Count</th><th>Missing %</th></tr>")
+            html_parts.append(
+                f"<p>Total missing cells: {self.missing.total_missing}</p>"
+            )
+            html_parts.append(
+                "<table><tr><th>Column</th><th>Missing Count</th><th>Missing %</th></tr>"
+            )
             for col_rpt in self.missing.column_reports:
-                html_parts.append(f"<tr><td>{col_rpt.column}</td><td>{col_rpt.missing_count}</td><td>{col_rpt.missing_percent:.2f}%</td></tr>")
+                html_parts.append(
+                    f"<tr><td>{col_rpt.column}</td>"
+                    f"<td>{col_rpt.missing_count}</td>"
+                    f"<td>{col_rpt.missing_percent:.2f}%</td></tr>"
+                )
             html_parts.append("</table>")
         if self.outliers:
             outlier_cols = [o for o in self.outliers if o.outlier_count > 0]
             if outlier_cols:
-                html_parts.append("<h2>Outliers (IQR)</h2><table><tr><th>Column</th><th>Outlier Count</th><th>Outlier %</th></tr>")
+                html_parts.append(
+                    "<h2>Outliers (IQR)</h2><table><tr><th>Column</th>"
+                    "<th>Outlier Count</th><th>Outlier %</th></tr>"
+                )
                 for o in outlier_cols:
-                    html_parts.append(f"<tr><td>{o.column}</td><td>{o.outlier_count}</td><td>{o.outlier_percent:.2f}%</td></tr>")
+                    html_parts.append(
+                        f"<tr><td>{o.column}</td>"
+                        f"<td>{o.outlier_count}</td>"
+                        f"<td>{o.outlier_percent:.2f}%</td></tr>"
+                    )
                 html_parts.append("</table>")
 
         # Feature Profiles
         if self.feature_profiles:
             const = [p.column for p in self.feature_profiles if p.is_constant]
-            quasi = [p.column for p in self.feature_profiles if p.is_quasi_constant]
+            quasi = [
+                p.column
+                for p in self.feature_profiles
+                if p.is_quasi_constant
+            ]
             if const or quasi:
                 html_parts.append("<h2>Feature Status</h2>")
                 if const:
-                    html_parts.append(f"<p><strong>Constant columns:</strong> {', '.join(const)}</p>")
+                    html_parts.append(
+                        f"<p><strong>Constant columns:</strong> {', '.join(const)}</p>"
+                    )
                 if quasi:
-                    html_parts.append(f"<p><strong>Quasi-constant columns:</strong> {', '.join(quasi)}</p>")
+                    html_parts.append(
+                        f"<p><strong>Quasi-constant columns:</strong> {', '.join(quasi)}</p>"
+                    )
 
         # Correlations
         if self.correlation_pairs:
-            html_parts.append("<h2>Highly Correlated Pairs</h2><table><tr><th>Feature A</th><th>Feature B</th><th>Coefficient</th></tr>")
+            html_parts.append(
+                "<h2>Highly Correlated Pairs</h2><table><tr>"
+                "<th>Feature A</th><th>Feature B</th><th>Coefficient</th></tr>"
+            )
             for pair in self.correlation_pairs:
-                html_parts.append(f"<tr><td>{pair.feature_a}</td><td>{pair.feature_b}</td><td>{pair.coefficient:.2f}</td></tr>")
+                html_parts.append(
+                    f"<tr><td>{pair.feature_a}</td>"
+                    f"<td>{pair.feature_b}</td>"
+                    f"<td>{pair.coefficient:.2f}</td></tr>"
+                )
             html_parts.append("</table>")
 
-        # Recommendations (using summarizer)
+        # Recommendations
         if self.recommendations:
             html_parts.append("<h2>Recommendations</h2>")
             try:
                 from preml.recommendation_engine import RecommendationEngine
+
                 summary_txt = RecommendationEngine.summarize(self.recommendations)
-                # Convert plain text to HTML with monospace pre block
                 html_parts.append("<pre>" + summary_txt + "</pre>")
             except Exception:
-                # fallback
-                for cat in ["imputation", "outlier_handling", "transformation",
-                            "scaling", "encoding", "feature_engineering", "feature_selection"]:
-                    recs = normalize_recommendation_items(self.recommendations.get(cat))
-                    if recs:
-                        html_parts.append(f"<h3>{cat.replace('_', ' ').title()}</h3><ul>")
-                        for r in recs:
-                            html_parts.append(f"<li><strong>{r.action}</strong> (confidence: {r.confidence:.2f})</li>")
-                        html_parts.append("</ul>")
+                logger.warning(
+                    "Failed to summarize recommendations for HTML; falling back."
+                )
+                for cat, recs in self._iter_recommendation_items():
+                    html_parts.append(
+                        f"<h3>{cat.replace('_', ' ').title()}</h3><ul>"
+                    )
+                    for r in recs:
+                        html_parts.append(
+                            f"<li><strong>{r.action}</strong> "
+                            f"(confidence: {r.confidence:.2f})</li>"
+                        )
+                    html_parts.append("</ul>")
 
         # Model Recommendations
         model_recs = self.recommendations.get("models", [])
         if model_recs:
             html_parts.append("<h2>Recommended Models</h2><ul>")
             for m in model_recs:
-                html_parts.append(f"<li><strong>{m.model_name}</strong> ({m.suitability}): {m.reason}</li>")
+                html_parts.append(
+                    f"<li><strong>{m.model_name}</strong> ({m.suitability}): {m.reason}</li>"
+                )
             html_parts.append("</ul>")
 
         # Visualizations with explanations
         if embed_plots and self.df is not None:
             html_parts.append("<h2>Visualisations</h2>")
 
-            def _add_plot_with_caption(fig, caption_key: str, section_title: str):
-                if fig is not None:
-                    html_parts.append(f"<h3>{section_title}</h3>")
-                    if caption_key in explanations:
-                        html_parts.append(f"<div class='caption'>{explanations[caption_key]}</div>")
-                    html_parts.append(_fig_to_html(fig))
-
             # Missing heatmap
             try:
                 fig = plot_missing_heatmap(self.df, config=self.config)
-                _add_plot_with_caption(fig, "missing_values_heatmap", "Missing Values Heatmap")
+                self._embed_plot_with_caption(
+                    html_parts,
+                    fig,
+                    "missing_values_heatmap",
+                    "Missing Values Heatmap",
+                    explanations,
+                )
             except Exception:
-                pass
+                logger.warning("Failed to create missing heatmap.", exc_info=True)
 
             # Numeric distributions
             try:
-                fig = plot_numeric_distributions(self.df, self.analysis,
-                                                 max_cols=getattr(self.config, "max_plot_cols", 12),
-                                                 config=self.config)
-                _add_plot_with_caption(fig, "numeric_distributions", "Numeric Distributions")
+                fig = plot_numeric_distributions(
+                    self.df,
+                    self.analysis,
+                    max_cols=self.config.max_plot_cols,
+                    config=self.config,
+                )
+                self._embed_plot_with_caption(
+                    html_parts,
+                    fig,
+                    "numeric_distributions",
+                    "Numeric Distributions",
+                    explanations,
+                )
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to create numeric distributions plot.", exc_info=True
+                )
 
             # Outlier summary
             try:
                 fig = plot_outlier_summary(self.analysis, config=self.config)
-                _add_plot_with_caption(fig, "outlier_summary", "Outlier Summary")
+                self._embed_plot_with_caption(
+                    html_parts,
+                    fig,
+                    "outlier_summary",
+                    "Outlier Summary",
+                    explanations,
+                )
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to create outlier summary plot.", exc_info=True
+                )
 
             # Correlation heatmap
             try:
-                fig = plot_correlation_heatmap(self.df, self.analysis, config=self.config)
-                _add_plot_with_caption(fig, "correlation_heatmap", "Correlation Heatmap")
+                fig = plot_correlation_heatmap(
+                    self.df, self.analysis, config=self.config
+                )
+                self._embed_plot_with_caption(
+                    html_parts,
+                    fig,
+                    "correlation_heatmap",
+                    "Correlation Heatmap",
+                    explanations,
+                )
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to create correlation heatmap.", exc_info=True
+                )
 
             # Target plots
             if self.target_profile is not None:
                 try:
-                    fig = plot_target_distribution(self.df, self.analysis, config=self.config)
-                    _add_plot_with_caption(fig, "target_distribution", "Target Distribution")
+                    fig = plot_target_distribution(
+                        self.df, self.analysis, config=self.config
+                    )
+                    self._embed_plot_with_caption(
+                        html_parts,
+                        fig,
+                        "target_distribution",
+                        "Target Distribution",
+                        explanations,
+                    )
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to create target distribution plot.",
+                        exc_info=True,
+                    )
                 if self.target_profile.is_regression:
                     try:
-                        fig = plot_target_correlations(self.df, self.analysis, config=self.config)
-                        _add_plot_with_caption(fig, "target_correlations", "Feature Correlations with Target")
+                        fig = plot_target_correlations(
+                            self.df, self.analysis, config=self.config
+                        )
+                        self._embed_plot_with_caption(
+                            html_parts,
+                            fig,
+                            "target_correlations",
+                            "Feature Correlations with Target",
+                            explanations,
+                        )
                     except Exception:
-                        pass
+                        logger.warning(
+                            "Failed to create target correlations plot.",
+                            exc_info=True,
+                        )
 
         html_parts.append("</body></html>")
         return "\n".join(html_parts)
@@ -656,14 +901,19 @@ class ReportGenerator:
     # ------------------------------------------------------------------
     # Save reports to files
     # ------------------------------------------------------------------
-    def save_report(self, filepath: str, format: str = "html", embed_plots: bool = True) -> None:
+    def save_report(
+        self,
+        filepath: str,
+        format: str = "html",
+        embed_plots: bool = True,
+    ) -> None:
         """Generate a report and save it to a file.
 
         Parameters
         ----------
         filepath : str
-            Path to the output file (extension will be forced to match format
-            if not already correct).
+            Path to the output file (the appropriate extension will be
+            appended if missing).
         format : str
             One of ``'html'``, ``'md'``, ``'txt'``.
         embed_plots : bool
@@ -677,6 +927,8 @@ class ReportGenerator:
         format = format.lower()
         if format == "html":
             content = self.generate_html(embed_plots=embed_plots)
+            if not filepath.endswith(".html"):
+                filepath += ".html"
         elif format in ("md", "markdown"):
             content = self.generate_markdown()
             if not filepath.endswith(".md"):

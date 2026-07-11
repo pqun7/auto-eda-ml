@@ -1,3 +1,4 @@
+# eda.py
 """Orchestration layer — combines facts from the statistics engine with
 recommendations from the recommendation engine to produce a complete EDA
 result.
@@ -128,11 +129,6 @@ class EDAAnalyzer:
         logger.info("EDA run complete.")
         return self._analysis_result
 
-    @staticmethod
-    def _safe_attr(obj: Any, attr: str, default: Any) -> Any:
-        """Return *obj.attr* if it exists, otherwise *default*."""
-        return getattr(obj, attr, default)
-
     def _compute_quality_score(
         self, stats: Dict[str, Any]
     ) -> Tuple[float, List[str]]:
@@ -158,8 +154,8 @@ class EDAAnalyzer:
         # Duplicates penalty
         dup = stats.get("duplicates")
         if dup is not None:
-            dup_total = self._safe_attr(dup, "total_duplicates", 0)
-            dup_pct = self._safe_attr(dup, "duplicate_percent", 0.0)
+            dup_total = getattr(dup, "total_duplicates", 0)
+            dup_pct = getattr(dup, "duplicate_percent", 0.0)
             if dup_total > 0:
                 penalty = min(dup_pct * 0.2, 15)
                 _apply_penalty(
@@ -170,7 +166,7 @@ class EDAAnalyzer:
         # Infinite values penalty
         inf = stats.get("infinite")
         if inf is not None:
-            inf_cols = self._safe_attr(inf, "columns_with_inf", [])
+            inf_cols = getattr(inf, "columns_with_inf", [])
             if inf_cols:
                 penalty = min(len(inf_cols) * 5, 15)
                 _apply_penalty(
@@ -181,7 +177,7 @@ class EDAAnalyzer:
         # Missing values penalty (safe division by zero)
         miss = stats.get("missing")
         if miss is not None:
-            miss_total = self._safe_attr(miss, "total_missing", 0)
+            miss_total = getattr(miss, "total_missing", 0)
             if miss_total > 0:
                 total_cells = len(self.df) * self.df.shape[1]
                 if total_cells > 0:
@@ -199,9 +195,7 @@ class EDAAnalyzer:
         outliers = stats.get("outliers", [])
         if outliers:
             high_outlier_cols = [
-                o
-                for o in outliers
-                if self._safe_attr(o, "outlier_percent", 0) > 10
+                o for o in outliers if getattr(o, "outlier_percent", 0) > 10
             ]
             if high_outlier_cols:
                 penalty = min(len(high_outlier_cols) * 3, 10)
@@ -215,8 +209,7 @@ class EDAAnalyzer:
         const_cols = [
             p
             for p in profiles
-            if self._safe_attr(p, "is_constant", False)
-            or self._safe_attr(p, "is_quasi_constant", False)
+            if getattr(p, "is_constant", False) or getattr(p, "is_quasi_constant", False)
         ]
         if const_cols:
             penalty = min(len(const_cols) * 2, 10)
@@ -248,7 +241,10 @@ class EDAAnalyzer:
 
         # TypedDict keys are optional; ensure required pieces exist at runtime
         if meta is None or dup is None or miss is None or rec is None:
-            raise RuntimeError("Analysis result is missing required sections (metadata/duplicates/missing/recommendations).")
+            raise RuntimeError(
+                "Analysis result is missing required sections "
+                "(metadata/duplicates/missing/recommendations)."
+            )
 
         lines = []
         lines.append("=" * 60)
@@ -256,9 +252,10 @@ class EDAAnalyzer:
         lines.append("=" * 60)
         lines.append(f"Rows: {meta.n_rows}   Columns: {meta.n_columns}")
         lines.append(f"Memory: {meta.memory_mb:.2f} MB")
-        lines.append(f"Duplicate rows: {dup.total_duplicates} ({dup.duplicate_percent:.2f}%)")
+        lines.append(
+            f"Duplicate rows: {dup.total_duplicates} ({dup.duplicate_percent:.2f}%)"
+        )
         lines.append(f"Missing cells: {miss.total_missing}")
-        # "data_quality_score" may be optional in the TypedDict; handle missing/None gracefully
         dq = result.get("data_quality_score")
         try:
             dq_val = float(dq) if dq is not None else 0.0
@@ -267,7 +264,13 @@ class EDAAnalyzer:
         lines.append(f"Data quality score: {dq_val:.1f}/100")
         lines.append("")
         lines.append("Key recommendations:")
-        for category in ["imputation", "outlier_handling", "transformation", "scaling", "encoding"]:
+        for category in [
+            "imputation",
+            "outlier_handling",
+            "transformation",
+            "scaling",
+            "encoding",
+        ]:
             cat_recs = normalize_recommendation_items(rec.get(category))
             for r in cat_recs[:2]:  # top 2 per category
                 lines.append(f"  [{r.category}] {r.action}")
