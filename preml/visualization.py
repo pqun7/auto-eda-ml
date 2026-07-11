@@ -20,13 +20,15 @@ RecommendationEngine to suggest concrete next steps.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from preml._analysis import resolve_analysis_result
 from preml.config import MLToolkitConfig, default_config
 from preml.schema import (
     CorrelationPair,
@@ -41,18 +43,22 @@ logger = logging.getLogger(__name__)
 # Internal helpers
 # ------------------------------------------------------------------
 def _get_profiles(analysis_result: Dict[str, Any]) -> List[FeatureProfile]:
+    analysis_result = resolve_analysis_result(analysis_result)
     return analysis_result.get("feature_profiles", [])
 
 
 def _get_outliers(analysis_result: Dict[str, Any]) -> List[OutlierReport]:
+    analysis_result = resolve_analysis_result(analysis_result)
     return analysis_result.get("outliers", [])
 
 
 def _get_correlations(analysis_result: Dict[str, Any]) -> List[CorrelationPair]:
+    analysis_result = resolve_analysis_result(analysis_result)
     return analysis_result.get("correlation_pairs", [])
 
 
 def _get_target_profile(analysis_result: Dict[str, Any]) -> Optional[TargetProfile]:
+    analysis_result = resolve_analysis_result(analysis_result)
     return analysis_result.get("target_profile")
 
 
@@ -69,7 +75,8 @@ def _get_missing_columns(df: pd.DataFrame, max_cols: int = 50) -> List[str]:
 
 def _apply_style(cfg: MLToolkitConfig) -> None:
     """Set global Seaborn style and palette from config."""
-    sns.set_style(cfg.plot_style)
+    style = cast(Literal["white", "dark", "whitegrid", "darkgrid", "ticks"], cfg.plot_style)
+    sns.set_style(style)
     sns.set_palette(cfg.color_palette)
 
 
@@ -90,7 +97,7 @@ def plot_numeric_distributions(
     max_cols: int = 20,
     show_outlier_lines: bool = True,
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Combined histogram + boxplot for numeric features.
 
     The histogram shows the distribution shape (skewness, peaks) and
@@ -141,17 +148,18 @@ def plot_numeric_distributions(
     for i, prof in enumerate(profs_to_plot):
         col = prof.column
         num = prof.numeric_profile  # guaranteed not None
-        data = df[col].dropna()
+        if num is None:
+            continue
+        data = df[col].dropna().to_numpy()
 
         # Histogram + KDE
         ax_hist = axes[i, 0]
         sns.histplot(data, kde=True, ax=ax_hist, color="steelblue",
                      edgecolor="white")
-        if num:
-            ax_hist.axvline(num.mean, color="red", linestyle="--",
-                            label=f"Mean={num.mean:.2f}")
-            ax_hist.axvline(num.median, color="green", linestyle="-",
-                            label=f"Median={num.median:.2f}")
+        ax_hist.axvline(num.mean, color="red", linestyle="--",
+                        label=f"Mean={num.mean:.2f}")
+        ax_hist.axvline(num.median, color="green", linestyle="-",
+                        label=f"Median={num.median:.2f}")
         if show_outlier_lines and col in outlier_dict:
             o = outlier_dict[col]
             if o.lower_bound is not None:
@@ -167,8 +175,7 @@ def plot_numeric_distributions(
         ax_box = axes[i, 1]
         sns.boxplot(x=data, ax=ax_box, color="lightblue")
         ax_box.set_title(f"{col} boxplot")
-        if num:
-            ax_box.set_xlabel(f"Min={num.min:.2f}, Max={num.max:.2f}")
+        ax_box.set_xlabel(f"Min={num.min:.2f}, Max={num.max:.2f}")
 
     plt.tight_layout()
     return fig
@@ -178,7 +185,7 @@ def plot_target_distribution(
     df: pd.DataFrame,
     analysis_result: Dict[str, Any],
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Plot the distribution of the target variable.
 
     For regression targets, a histogram + KDE and a boxplot are shown.
@@ -210,18 +217,22 @@ def plot_target_distribution(
     figsize = _safe_figsize(cfg, (10, 6))
 
     target_col = target_profile.column
-    data = df[target_col].dropna()
+    target_series = df[target_col].dropna()
 
     fig, axes = plt.subplots(1, 2, figsize=(figsize[0], 5))
     if target_profile.is_regression:
-        sns.histplot(data, kde=True, ax=axes[0], color="teal")
+        target_values = target_series.to_numpy()
+        sns.histplot(target_values, kde=True, ax=axes[0], color="teal")
         axes[0].set_title(f"Target distribution: {target_col}")
-        sns.boxplot(x=data, ax=axes[1], color="lightgreen")
+        sns.boxplot(x=target_values, ax=axes[1], color="lightgreen")
         axes[1].set_title(f"Target boxplot: {target_col}")
     else:
-        value_counts = data.value_counts()
-        axes[0].bar(value_counts.index.astype(str), value_counts.values,
-                    color="salmon")
+        value_counts = target_series.value_counts()
+        axes[0].bar(
+            value_counts.index.astype(str),
+            value_counts.values,
+            color="salmon",
+        )
         axes[0].set_title(f"Target classes: {target_col}")
         axes[0].set_ylabel("Count")
         axes[1].axis("off")
@@ -236,7 +247,7 @@ def plot_correlation_heatmap(
     df: pd.DataFrame,
     analysis_result: Dict[str, Any],
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Plot a Pearson correlation heatmap for numeric features.
 
     Only columns that appear in correlation pairs above the configured
@@ -290,7 +301,7 @@ def plot_top_correlations_bar(
     analysis_result: Dict[str, Any],
     top_n: int = 10,
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Bar chart of the top absolute correlations.
 
     Interpretation: The tallest bars show feature pairs with the
@@ -342,7 +353,7 @@ def plot_top_correlations_bar(
 def plot_missing_heatmap(
     df: pd.DataFrame,
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Heatmap showing missing values across columns (yellow = missing).
 
     If the dataset has many rows, a random sample of up to 5000 rows
@@ -392,7 +403,7 @@ def plot_missing_heatmap(
 def plot_outlier_summary(
     analysis_result: Dict[str, Any],
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Horizontal bar chart showing outlier percentages per numeric column.
 
     Interpretation: Columns with a high outlier percentage may contain
@@ -422,7 +433,7 @@ def plot_outlier_summary(
         return None
 
     labels = [o.column for o in non_zero]
-    percentages = [o.outlier_percent for o in non_zero]
+    percentages = np.asarray([float(o.outlier_percent) for o in non_zero], dtype=float)
 
     fig, ax = plt.subplots(figsize=(figsize[0], 0.4 * len(labels)))
     ax.barh(range(len(labels)), percentages, color="coral", edgecolor="black")
@@ -445,7 +456,7 @@ def plot_target_correlations(
     analysis_result: Dict[str, Any],
     top_n: int = 15,
     config: Optional[MLToolkitConfig] = None,
-) -> Optional[plt.Figure]:
+) -> Optional[Figure]:
     """Bar chart of Pearson correlations between features and a numeric target.
 
     Positive correlations are shown in teal, negative in coral.
@@ -486,7 +497,8 @@ def plot_target_correlations(
 
     fig, ax = plt.subplots(figsize=(figsize[0], 0.5 * len(signed_corrs)))
     colors = ["teal" if c >= 0 else "coral" for c in signed_corrs]
-    ax.barh(range(len(signed_corrs)), signed_corrs.values, color=colors,
+    widths = np.asarray(signed_corrs.values, dtype=float)
+    ax.barh(range(len(signed_corrs)), widths, color=colors,
             edgecolor="black")
     ax.set_yticks(range(len(signed_corrs)))
     ax.set_yticklabels(signed_corrs.index)
@@ -518,6 +530,7 @@ def _ensure_recommendations(
     config: Optional[MLToolkitConfig],
 ) -> Dict[str, Any]:
     """Return the recommendations dict, generating them if necessary."""
+    analysis_result = resolve_analysis_result(analysis_result)
     if recommendations is not None:
         return recommendations
     try:
@@ -547,10 +560,11 @@ def explain_visualizations(
     ----------
     analysis_result : dict
         Output of `StatisticsEngine.run_full_analysis()`.
-    recommendations : dict, optional
+        signed_corrs = corrs.loc[corrs_sorted.index].astype(float)
         Pre‑computed recommendations from
         `RecommendationEngine.generate_recommendations()`. If not
-        provided, they will be generated internally using the default
+        widths = signed_corrs.to_numpy(dtype=float)
+        colors = ["teal" if c >= 0 else "coral" for c in widths]
         configuration.
     config : MLToolkitConfig, optional
         Configuration used when generating recommendations on the fly.
@@ -571,6 +585,7 @@ def explain_visualizations(
     # ------------------------------------------------------------------
     # Ensure we have recommendations
     # ------------------------------------------------------------------
+    analysis_result = resolve_analysis_result(analysis_result)
     recs = _ensure_recommendations(analysis_result, recommendations, config)
 
     # Extract relevant parts from recommendations
@@ -597,7 +612,11 @@ def explain_visualizations(
             "",
             "**Key observations:**"
         ]
-        skewed_cols = [p.column for p in numeric if abs(p.numeric_profile.skewness) > 1.0]
+        skewed_cols = []
+        for p in numeric:
+            num = p.numeric_profile
+            if num is not None and abs(num.skewness) > 1.0:
+                skewed_cols.append(p.column)
         if skewed_cols:
             lines.append(f"  Skewed features (|skew| > 1): {', '.join(skewed_cols)}")
         else:
@@ -625,6 +644,7 @@ def explain_visualizations(
     # ==================================================================
     target_profile = _get_target_profile(analysis_result)
     if target_profile:
+        ratio = None
         lines = [
             "**What this plot shows:**",
             "  Distribution of the target variable. For regression: histogram",
@@ -650,7 +670,7 @@ def explain_visualizations(
             lines.append("  Consider a log or Box‑Cox transformation if the target is skewed.")
             lines.append("  Ensure the evaluation metric is appropriate (e.g., RMSLE for skewed targets).")
         else:
-            if ratio > 5:
+            if ratio is not None and ratio > 5:
                 lines.append("  Use stratified sampling during train/test split.")
                 lines.append("  Consider class weights, oversampling (SMOTE), or undersampling.")
             lines.append("  Choose metrics robust to imbalance (F1, AUC‑ROC).")

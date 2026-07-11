@@ -16,6 +16,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from preml._analysis import resolve_analysis_result
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import DataValidationError
 from preml.schema import (
@@ -83,10 +84,12 @@ class FeatureEngineering:
         df: Optional[pd.DataFrame] = None,
         config: Optional[MLToolkitConfig] = None,
     ) -> None:
-        if not isinstance(analysis_result, dict):
+        try:
+            analysis_result = resolve_analysis_result(analysis_result)
+        except TypeError as exc:
             raise DataValidationError(
-                "analysis_result must be a dictionary (the output of EDAAnalyzer.run())."
-            )
+                "analysis_result must be a dictionary (the output of EDAAnalyzer.run()) or an EDAAnalyzer instance."
+            ) from exc
 
         self.analysis = analysis_result
         self.df = df

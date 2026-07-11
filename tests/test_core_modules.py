@@ -19,6 +19,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 from preml.config import MLToolkitConfig
+from preml.eda import EDAAnalyzer
 from preml.feature_engineering import FeatureEngineering
 from preml.model_utils import compute_metrics, cross_validate
 from preml.recommendation_utils import normalize_recommendation_items
@@ -188,6 +189,22 @@ class TestReportGenerator:
         output_path = tmp_path / "eda_report"
         report.save_report(str(output_path), format="txt", embed_plots=False)
         assert Path(str(output_path) + ".txt").exists()
+
+    def test_accepts_eda_analyzer_instance(self):
+        df = pd.DataFrame(
+            {
+                "num": [1.0, 2.0, 3.0, 4.0],
+                "target": [0, 1, 0, 1],
+            }
+        )
+        analyzer = EDAAnalyzer(df, target="target")
+
+        report = ReportGenerator(analyzer, df=df)
+
+        text = report.generate_text()
+
+        assert "EDA REPORT" in text
+        assert "Dataset Overview" in text
 
 
 class TestVisualization:

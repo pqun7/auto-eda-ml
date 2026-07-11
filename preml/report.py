@@ -20,6 +20,7 @@ import matplotlib.figure
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from preml._analysis import resolve_analysis_result
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import ReportError
 from preml.recommendation_utils import normalize_recommendation_items
@@ -106,32 +107,32 @@ class ReportGenerator:
         df: Optional[pd.DataFrame] = None,
         config: Optional[MLToolkitConfig] = None,
     ) -> None:
-        self.analysis = analysis_result
+        self.analysis = resolve_analysis_result(analysis_result)
         self.df = df
         self.config = config or default_config
 
         # ------------------------------------------------------------------
         # Extract commonly used sections with safe defaults
         # ------------------------------------------------------------------
-        self.metadata = analysis_result.get("metadata")
-        self.duplicates = analysis_result.get("duplicates")
-        self.infinite = analysis_result.get("infinite")
-        self.missing = analysis_result.get("missing")
-        self.outliers: List[OutlierReport] = analysis_result.get("outliers", [])
-        self.feature_profiles: List[FeatureProfile] = analysis_result.get(
+        self.metadata = self.analysis.get("metadata")
+        self.duplicates = self.analysis.get("duplicates")
+        self.infinite = self.analysis.get("infinite")
+        self.missing = self.analysis.get("missing")
+        self.outliers: List[OutlierReport] = self.analysis.get("outliers", [])
+        self.feature_profiles: List[FeatureProfile] = self.analysis.get(
             "feature_profiles", []
         )
-        self.correlation_pairs: List[CorrelationPair] = analysis_result.get(
+        self.correlation_pairs: List[CorrelationPair] = self.analysis.get(
             "correlation_pairs", []
         )
-        self.target_profile: Optional[TargetProfile] = analysis_result.get(
+        self.target_profile: Optional[TargetProfile] = self.analysis.get(
             "target_profile"
         )
-        self.recommendations: Dict[str, Any] = analysis_result.get(
+        self.recommendations: Dict[str, Any] = self.analysis.get(
             "recommendations", {}
         )
-        self.quality_score = analysis_result.get("data_quality_score", 0.0)
-        self.quality_notes: List[str] = analysis_result.get("data_quality_notes", [])
+        self.quality_score = self.analysis.get("data_quality_score", 0.0)
+        self.quality_notes: List[str] = self.analysis.get("data_quality_notes", [])
 
         # Ensure recommendations exist (generate if missing, but only once)
         self._recommendations_ensured = False

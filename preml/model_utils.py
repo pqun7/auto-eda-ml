@@ -37,6 +37,7 @@ from sklearn.model_selection import cross_validate as sk_cross_validate
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 
+from preml._analysis import resolve_analysis_result
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import ModelError
 from preml.schema import ModelRecommendation, TargetProfile
@@ -455,6 +456,8 @@ class BaselineTrainer:
                 f"Expected a ColumnTransformer for preprocessing_pipeline, "
                 f"got {type(preprocessing_pipeline)}."
             )
+
+        analysis_result = resolve_analysis_result(analysis_result)
 
         target_profile = analysis_result.get("target_profile")
         if not target_profile:

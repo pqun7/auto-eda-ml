@@ -17,9 +17,11 @@ values, and (optionally) the availability of XGBoost / LightGBM.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from preml._analysis import resolve_analysis_result
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import RecommendationError
 from preml.schema import (
@@ -42,17 +44,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Optional gradient boosting libraries
 # ---------------------------------------------------------------------------
-try:
-    import xgboost as xgb  # noqa: F401
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
-
-try:
-    import lightgbm  # noqa: F401
-    LIGHTGBM_AVAILABLE = True
-except ImportError:  # pragma: no cover - optional dependency
-    LIGHTGBM_AVAILABLE = False
+XGBOOST_AVAILABLE = importlib.util.find_spec("xgboost") is not None
+LIGHTGBM_AVAILABLE = importlib.util.find_spec("lightgbm") is not None
 
 
 class RecommendationEngine:
@@ -1059,11 +1052,12 @@ class RecommendationEngine:
             If the input dictionary is malformed or required keys are missing.
         """
         # ---- Input validation ----
-        if not isinstance(analysis_results, dict):
+        try:
+            analysis_results = resolve_analysis_result(analysis_results)
+        except TypeError as exc:
             raise RecommendationError(
-                "analysis_results must be a dictionary returned by "
-                "StatisticsEngine.run_full_analysis()."
-            )
+                "analysis_results must be a dictionary returned by StatisticsEngine.run_full_analysis() or an EDAAnalyzer instance."
+            ) from exc
 
         required = [
             "duplicates", "infinite", "missing", "outliers",

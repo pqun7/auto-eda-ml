@@ -18,6 +18,7 @@ from sklearn.preprocessing import PowerTransformer, RobustScaler
 
 from preml.config import MLToolkitConfig
 from preml.exceptions import PreprocessingError
+from preml.eda import EDAAnalyzer
 from preml.preprocessing import PreprocessingBuilder
 from preml.schema import (
     FeatureProfile,
@@ -180,3 +181,17 @@ class TestPreprocessingBuilder:
         builder = PreprocessingBuilder(analysis)
         with pytest.raises(PreprocessingError):
             builder.build_pipeline()
+
+    def test_accepts_eda_analyzer_instance(self):
+        df = pd.DataFrame(
+            {
+                "num": [1.0, 2.0, 3.0, 4.0],
+                "cat": ["A", "B", "A", "C"],
+            }
+        )
+        analyzer = EDAAnalyzer(df)
+        analysis = analyzer.run()
+
+        builder = PreprocessingBuilder(analyzer)
+
+        assert builder.feature_profiles == analysis["feature_profiles"]

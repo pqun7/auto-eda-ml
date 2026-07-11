@@ -35,6 +35,7 @@ from sklearn.preprocessing import (
     StandardScaler,
 )
 
+from preml._analysis import resolve_analysis_result
 from preml.config import MLToolkitConfig, default_config
 from preml.exceptions import PreprocessingError
 from preml.schema import (
@@ -91,10 +92,12 @@ class PreprocessingBuilder:
         analysis_result: Dict[str, Any],
         config: Optional[MLToolkitConfig] = None,
     ) -> None:
-        if not isinstance(analysis_result, dict):
+        try:
+            analysis_result = resolve_analysis_result(analysis_result)
+        except TypeError as exc:
             raise PreprocessingError(
-                "analysis_result must be a dictionary (the output of EDAAnalyzer.run())."
-            )
+                "analysis_result must be a dictionary (the output of EDAAnalyzer.run()) or an EDAAnalyzer instance."
+            ) from exc
 
         # Validate required sections
         if "feature_profiles" not in analysis_result:
@@ -253,7 +256,9 @@ class PreprocessingBuilder:
         """Internal helper to create a numeric sub‑pipeline."""
         # Imputation strategy
         strategy = "median" if self.has_outliers else "mean"
-        steps = [("imputer", SimpleImputer(strategy=strategy))]
+        steps: List[Tuple[str, Any]] = [
+            ("imputer", SimpleImputer(strategy=strategy))
+        ]
 
         # Optional power transformation for skewed data
         if apply_power:
