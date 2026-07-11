@@ -1,1254 +1,2014 @@
 """
-Decision layer — interprets statistical facts and produces
-evidence‑based recommendations.
+advanced_recommendation_engine.py
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Research-backed AutoML Recommendation Engine.
 
-This module reads facts (dataclass instances from
-preml.statistics_engine) and outputs Recommendations,
-PipelineSuggestions, and ModelRecommendations.  No computation of
-statistics happens here; all decisions are derived from the supplied
-evidence.
+Implements state-of-the-art techniques:
+- Meta-learning for algorithm selection (Garouani et al., 2024)
+- Early-stopping cross-validation (Bergman, Purucker & Hutter, 2024)
+- Multi-fidelity optimization with Successive Halving (FlexHB, 2024)
+- Conditional preprocessing based on model type
+- Learning Curve Cross-Validation (LCCV, 2023) with power-law extrapolation
+- Bayesian hyperparameter optimisation via scikit-optimize (optional)
+- Cosine similarity for meta-feature matching
 
-Thresholds are configured via :class:`MLToolkitConfig` with sensible
-defaults.  The engine considers missing values, outliers, skewness,
-cardinality, and multicollinearity to generate actionable advice.
-Model recommendations adapt to dataset size, presence of missing
-values, and (optionally) the availability of XGBoost / LightGBM.
+All decisions are empirical: models are actually fitted and evaluated on the
+data using proper sklearn Pipelines to avoid data leakage. A time budget
+controls the entire process; early stopping and multi-fidelity techniques
+ensure a validated recommendation within the allocated time.
+
+Example usage
+-------------
+>>> import pandas as pd
+>>> import numpy as np
+>>> from preml.recommendation_engine import RecommendationEngine
+>>> X = pd.DataFrame({
+...     'feature1': np.random.randn(1000),
+...     'feature2': np.random.randn(1000),
+...     'category': np.random.choice(['A', 'B', 'C'], 1000)
+... })
+>>> y = X['feature1'] * 0.5 + X['feature2'] * 0.3 + np.random.randn(1000) * 0.1
+>>> engine = RecommendationEngine(random_state=42)
+>>> result = engine.fit(X, y, time_budget_seconds=60)
+>>> print(engine.summarize(result))
+>>> recommendation = engine.get_recommendation(X, y)
+>>> print(f"Best model: {recommendation['model']}")
+>>> print(f"CV Score: {recommendation['cv_score']:.4f} +/- {recommendation['cv_std']:.4f}")
+>>> print(f"Pipeline: {recommendation['pipeline']}")
 """
 
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import hashlib
+import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import sqlite3
+import time
+import warnings
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, clone
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import (
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
+from sklearn.experimental import enable_halving_search_cv  # noqa
+from sklearn.linear_model import (
+    ElasticNetCV,
+    LassoCV,
+    LinearRegression,
+    LogisticRegression,
+    LogisticRegressionCV,
+    RidgeCV,
+)
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    make_scorer,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import (
+    BaseCrossValidator,
+    KFold,
+    RandomizedSearchCV,
+    StratifiedKFold,
+    cross_val_score,
+    learning_curve,
+    train_test_split,
+)
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    OneHotEncoder,
+    OrdinalEncoder,
+    PowerTransformer,
+    RobustScaler,
+    StandardScaler,
+)
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.utils.validation import check_is_fitted
 
 from preml._analysis import resolve_analysis_result
-from preml.config import MLToolkitConfig, default_config
-from preml.exceptions import RecommendationError
-from preml.schema import (
-    CorrelationPair,
-    DatasetMetadata,
-    DuplicateReport,
-    Evidence,
-    FeatureProfile,
-    InfiniteReport,
-    MissingReport,
-    ModelRecommendation,
-    OutlierReport,
-    PipelineSuggestion,
-    Recommendation,
-    TargetProfile,
-)
-
-logger = logging.getLogger(__name__)
+from preml.config import MLToolkitConfig
+from preml.exceptions import RecommendationError as SharedRecommendationError
+from preml.schema import Evidence, ModelRecommendation, PipelineSuggestion, Recommendation
 
 # ---------------------------------------------------------------------------
-# Optional gradient boosting libraries
+# Optional dependencies
 # ---------------------------------------------------------------------------
 XGBOOST_AVAILABLE = importlib.util.find_spec("xgboost") is not None
 LIGHTGBM_AVAILABLE = importlib.util.find_spec("lightgbm") is not None
+SKOPT_AVAILABLE = importlib.util.find_spec("skopt") is not None
 
 
-class RecommendationEngine:
-    """Generates recommendations based on statistical evidence.
+def _import_optional_module(module_name: str):
+    """Import an optional dependency only when needed."""
+    try:
+        return __import__(module_name, fromlist=["*"])
+    except ImportError:
+        return None
+
+# ---------------------------------------------------------------------------
+# Custom exceptions
+# ---------------------------------------------------------------------------
+RecommendationError = SharedRecommendationError
+
+
+class ValidationTimeoutError(Exception):
+    """Raised when the validation time budget is exceeded."""
+
+class KnowledgeBaseError(Exception):
+    """Raised when the knowledge base is corrupted or inaccessible."""
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+@dataclass
+class ModelCandidate:
+    """Container for a model candidate with its metadata."""
+    name: str
+    estimator_class: type
+    priority: float  # 1.0 = highest
+    hyperparams: Dict[str, Any]
+    supports_categorical: bool
+    supports_missing: bool
+    needs_scaling: bool
+    is_ensemble: bool = False
+    is_linear: bool = False
+
+@dataclass
+class EvaluationResult:
+    """Result of evaluating a candidate."""
+    model: ModelCandidate
+    cv_score: float
+    cv_std: float
+    training_time: float
+    n_folds_completed: int
+    learning_curve: Optional[List[Tuple[float, float]]] = None
+    extrapolated_score: Optional[float] = None
+    hyperparams_tuned: Optional[Dict[str, Any]] = None
+
+# ---------------------------------------------------------------------------
+# Knowledge Base (meta-learning)
+# ---------------------------------------------------------------------------
+class KnowledgeBase:
+    """SQLite-backed storage for dataset meta-features and model performance.
+
+    Uses **cosine similarity** for meta-feature matching as in (Garouani et al., 2024).
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite file. Created if missing.
+    """
+
+    def __init__(self, db_path: str = "preml_knowledge.db") -> None:
+        self.db_path = db_path
+        self._init_db()
+        self._cached_vectors: Optional[List[Tuple[str, np.ndarray]]] = None
+
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS meta_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_hash TEXT NOT NULL,
+                    meta_features TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(dataset_hash)
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS model_performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_hash TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    suitability TEXT,
+                    cv_score REAL,
+                    hyperparams TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(dataset_hash) REFERENCES meta_data(dataset_hash)
+                )"""
+            )
+            conn.commit()
+
+    def store_meta_features(self, dataset_hash: str, meta: Dict[str, Any]) -> None:
+        meta_json = json.dumps(meta)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta_data (dataset_hash, meta_features) VALUES (?, ?)",
+                (dataset_hash, meta_json),
+            )
+            conn.commit()
+
+    def store_model_performance(
+        self,
+        dataset_hash: str,
+        model_name: str,
+        suitability: str,
+        cv_score: float,
+        hyperparams: Dict[str, Any],
+    ) -> None:
+        hp_json = json.dumps(hyperparams)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO model_performance "
+                "(dataset_hash, model_name, suitability, cv_score, hyperparams) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (dataset_hash, model_name, suitability, cv_score, hp_json),
+            )
+            conn.commit()
+
+    def _load_all_vectors(self) -> List[Tuple[str, np.ndarray]]:
+        """Load all stored meta-feature vectors into memory (cached)."""
+        if self._cached_vectors is not None:
+            return self._cached_vectors
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT dataset_hash, meta_features FROM meta_data"
+            ).fetchall()
+        vectors = []
+        for ds_hash, meta_json in rows:
+            meta = json.loads(meta_json)
+            # Important: use the same feature keys as meta-feature extraction
+            vec = np.array([
+                meta.get("n_samples", 0),
+                meta.get("n_features", 0),
+                meta.get("n_numeric", 0),
+                meta.get("n_categorical", 0),
+                meta.get("missing_ratio", 0.0),
+                meta.get("skewness_mean", 0.0),
+                meta.get("target_variance", 0.0),
+                meta.get("signal_to_noise_ratio", 0.0),
+            ], dtype=float)
+            vectors.append((ds_hash, vec))
+        self._cached_vectors = vectors
+        return vectors
+
+    def query_similar_datasets(
+        self, meta: Dict[str, Any], top_k: int = 5
+    ) -> List[Tuple[str, float, List[Dict[str, Any]]]]:
+        """Return top_k similar datasets with their best models using cosine similarity.
+
+        Returns list of (dataset_hash, similarity_score, [model_records]).
+        """
+        vectors = self._load_all_vectors()
+        if not vectors:
+            return []
+
+        # Current vector
+        cur_vec = np.array([
+            meta.get("n_samples", 0),
+            meta.get("n_features", 0),
+            meta.get("n_numeric", 0),
+            meta.get("n_categorical", 0),
+            meta.get("missing_ratio", 0.0),
+            meta.get("skewness_mean", 0.0),
+            meta.get("target_variance", 0.0),
+            meta.get("signal_to_noise_ratio", 0.0),
+        ], dtype=float)
+
+        # Cosine similarities
+        similarities = []
+        for ds_hash, vec in vectors:
+            norm_prod = np.linalg.norm(cur_vec) * np.linalg.norm(vec)
+            if norm_prod == 0:
+                sim = 0.0
+            else:
+                sim = np.dot(cur_vec, vec) / norm_prod
+            similarities.append((ds_hash, sim))
+
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        top = similarities[:top_k]
+
+        # Retrieve model performances
+        result = []
+        with sqlite3.connect(self.db_path) as conn:
+            for ds_hash, sim in top:
+                rows = conn.execute(
+                    "SELECT model_name, suitability, cv_score, hyperparams "
+                    "FROM model_performance WHERE dataset_hash = ? "
+                    "ORDER BY cv_score DESC LIMIT 3",
+                    (ds_hash,),
+                ).fetchall()
+                models = [
+                    {
+                        "model_name": r[0],
+                        "suitability": r[1],
+                        "cv_score": r[2],
+                        "hyperparams": json.loads(r[3]) if r[3] else {},
+                    }
+                    for r in rows
+                ]
+                result.append((ds_hash, sim, models))
+        return result
+
+# ---------------------------------------------------------------------------
+# Main Recommendation Engine
+# ---------------------------------------------------------------------------
+class RecommendationEngine(BaseEstimator):
+    """Research-backed AutoML Recommendation Engine.
+
+    This engine uses empirical validation (not just heuristics) to recommend
+    the best model and preprocessing pipeline for a given dataset.
 
     Parameters
     ----------
     config : MLToolkitConfig, optional
-        Configuration controlling thresholds and behaviour.
-        See :class:`MLToolkitConfig` for all available parameters.
-    enable_feature_engineering : bool
-        If True, the engine may suggest feature engineering steps
-        (e.g. ratios, interactions) based on statistical patterns.
-        These suggestions never rely on column names.
+        Shared configuration object. If omitted, a default configuration is used.
+    knowledge_db_path : str, default='knowledge.db'
+        Path to SQLite knowledge base for meta-learning. If None, meta-learning is disabled.
+    random_state : int, default=42
+        Random seed for reproducibility. Falls back to ``config.random_state`` when omitted.
+    enable_meta_learning : bool, default=True
+        Whether to use the knowledge base for prior recommendations.
+    enable_feature_engineering : bool, optional
+        Overrides ``config.enable_feature_engineering`` when provided.
     """
 
     def __init__(
         self,
         config: Optional[MLToolkitConfig] = None,
-        enable_feature_engineering: bool = True,
+        knowledge_db_path: Optional[str] = "knowledge.db",
+        random_state: Optional[int] = None,
+        enable_meta_learning: bool = True,
+        enable_feature_engineering: Optional[bool] = None,
     ) -> None:
-        self.config = config or default_config
-        self.enable_feature_engineering = enable_feature_engineering
-
-        # Internal cache for outlier column names (set during imputation step).
-        self._outlier_columns: List[str] = []
-
-    # ------------------------------------------------------------------
-    # Helper: build a Recommendation
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _make_recommendation(
-        category: str,
-        action: str,
-        confidence: float,
-        reasons: List[str],
-        stats: Dict[str, Any],
-        alternatives: Optional[List[str]] = None,
-        risks: Optional[List[str]] = None,
-    ) -> Recommendation:
-        """Create a Recommendation with a list of Evidence."""
-        evidence_list = [
-            Evidence(reason=reason, statistics=stats) for reason in reasons
-        ]
-        return Recommendation(
-            category=category,
-            action=action,
-            confidence=min(max(confidence, 0.0), 1.0),
-            evidence=evidence_list,
-            alternative_options=alternatives or [],
-            risks=risks or [],
+        self.config = config or MLToolkitConfig()
+        self.knowledge_db_path = knowledge_db_path
+        self.random_state = self.config.random_state if random_state is None else random_state
+        self.enable_meta_learning = enable_meta_learning
+        self.enable_feature_engineering = (
+            self.config.enable_feature_engineering
+            if enable_feature_engineering is None
+            else enable_feature_engineering
         )
+        self.kb = KnowledgeBase(knowledge_db_path) if knowledge_db_path else None
 
-    # ------------------------------------------------------------------
-    # Individual recommendation methods
-    # ------------------------------------------------------------------
-    def _imputation_recommendations(
+        # Internal state
+        self._meta_features: Dict[str, Any] = {}
+        self._candidates: List[ModelCandidate] = []
+        self._best_result: Optional[EvaluationResult] = None
+        self._pipeline: Optional[Pipeline] = None
+        self._fitted: bool = False
+        self._is_regression: Optional[bool] = None
+        self._scoring: Optional[str] = None
+
+        # Cached column types
+        self._numeric_cols: List[str] = []
+        self._categorical_cols: List[str] = []
+
+    def _notify_progress(
         self,
-        feature_profiles: List[FeatureProfile],
-        missing_report: MissingReport,
-        outlier_columns: Optional[List[str]] = None,
-    ) -> List[Recommendation]:
-        """Suggest imputation strategies per column with missing values."""
-        recs: List[Recommendation] = []
-        if not missing_report.columns_with_missing:
-            return recs
-
-        profile_map: Dict[str, FeatureProfile] = {p.column: p for p in feature_profiles}
-        self._outlier_columns = outlier_columns or []
-
-        for col_report in missing_report.column_reports:
-            col = col_report.column
-            miss_pct = col_report.missing_percent  # already a percentage (0-100)
-            stats: Dict[str, Any] = {"missing_percent": miss_pct}
-
-            # When missing ratio exceeds the threshold, raise a high‑level flag.
-            if miss_pct > self.config.missing_threshold * 100:
-                recs.append(
-                    self._make_recommendation(
-                        category="imputation",
-                        action=(
-                            f"High missing ratio ({miss_pct:.1f}%) in column "
-                            f"'{col}'. Investigate column importance before "
-                            "dropping or imputing."
-                        ),
-                        confidence=0.9,
-                        reasons=[
-                            f"Missing ratio exceeds threshold "
-                            f"({self.config.missing_threshold*100:.0f}%)."
-                        ],
-                        stats=stats,
-                        risks=[
-                            "Dropping may lose critical information.",
-                            "Imputation with high missing may introduce bias.",
-                        ],
-                    )
-                )
-                continue
-
-            profile = profile_map.get(col)
-            if profile is None:
-                continue
-
-            if profile.numeric_profile:
-                has_outliers = col in self._outlier_columns
-                if has_outliers:
-                    action = (
-                        f"Column '{col}': use median imputation "
-                        "(outliers present)."
-                    )
-                    reasons = [f"Outliers detected in '{col}'; median is robust."]
-                else:
-                    action = (
-                        f"Column '{col}': use mean or median imputation "
-                        "(no significant outliers)."
-                    )
-                    reasons = [
-                        f"No outliers detected in '{col}'. "
-                        "Mean is acceptable if distribution is symmetric."
-                    ]
-                recs.append(
-                    self._make_recommendation(
-                        category="imputation",
-                        action=action,
-                        confidence=0.8,
-                        reasons=reasons,
-                        stats={**stats, "has_outliers": has_outliers},
-                        alternatives=[
-                            "KNNImputer if missingness is MAR.",
-                            "IterativeImputer for complex patterns.",
-                        ],
-                        risks=["Mean imputation distorts variance."],
-                    )
-                )
-            else:
-                recs.append(
-                    self._make_recommendation(
-                        category="imputation",
-                        action=(
-                            f"Column '{col}': impute categorical missing "
-                            "with mode or a 'missing' category."
-                        ),
-                        confidence=0.7,
-                        reasons=[f"Categorical feature '{col}' with missing values."],
-                        stats=stats,
-                        alternatives=["Create a separate 'Unknown' category."],
-                        risks=["Mode may overrepresent majority class."],
-                    )
-                )
-
-        return recs
-
-    def _outlier_recommendations(
-        self, outlier_reports: List[OutlierReport]
-    ) -> List[Recommendation]:
-        """Generate recommendations for features with outliers."""
-        recs: List[Recommendation] = []
-        threshold = getattr(self.config, "outlier_threshold_percent", 5.0)
-        for out in outlier_reports:
-            if out.outlier_count == 0:
-                continue
-            stats = {
-                "outlier_count": out.outlier_count,
-                "outlier_percent": out.outlier_percent,
-            }
-            if out.outlier_percent > threshold:
-                action = (
-                    f"Column '{out.column}': significant outlier ratio "
-                    f"({out.outlier_percent:.1f}%). Investigate source "
-                    "before removal. Consider winsorization or robust "
-                    "scaling if erroneous."
-                )
-                confidence = 0.85
-            else:
-                action = (
-                    f"Column '{out.column}': minor outliers "
-                    f"({out.outlier_percent:.1f}%). Likely natural "
-                    "extreme values. Keep unless domain suggests otherwise."
-                )
-                confidence = 0.6
-
-            recs.append(
-                self._make_recommendation(
-                    category="outlier_handling",
-                    action=action,
-                    confidence=confidence,
-                    reasons=[
-                        f"IQR method detected {out.outlier_count} outliers "
-                        f"({out.outlier_percent:.1f}%) in '{out.column}'."
-                    ],
-                    stats=stats,
-                    alternatives=["Winsorization", "Capping", "Transformation"],
-                    risks=["Removing valid extremes may harm model generalization."],
-                )
-            )
-        return recs
-
-    def _transformation_recommendations(
-        self, feature_profiles: List[FeatureProfile]
-    ) -> List[Recommendation]:
-        """Suggest transformations for skewed numeric features."""
-        recs: List[Recommendation] = []
-        skew_threshold = self.config.skewness_threshold
-        for prof in feature_profiles:
-            if not prof.numeric_profile:
-                continue
-            num = prof.numeric_profile
-            sk = num.skewness
-            if abs(sk) < skew_threshold:
-                continue
-
-            col = prof.column
-            stats = {"skewness": sk}
-            if sk > skew_threshold:
-                if num.min is not None and num.min >= 0:
-                    action = (
-                        f"Column '{col}': apply log1p transform to "
-                        f"reduce right skew (skew={sk:.2f})."
-                    )
-                    reasons = ["Highly right‑skewed distribution."]
-                    confidence = 0.9
-                else:
-                    action = (
-                        f"Column '{col}': apply Yeo‑Johnson transform "
-                        f"(right‑skewed, negative values present)."
-                    )
-                    reasons = ["Highly right‑skewed with negative values."]
-                    confidence = 0.85
-            else:
-                action = (
-                    f"Column '{col}': apply Yeo‑Johnson to correct "
-                    f"left skew (skew={sk:.2f})."
-                )
-                reasons = ["Highly left‑skewed distribution."]
-                confidence = 0.8
-
-            recs.append(
-                self._make_recommendation(
-                    category="transformation",
-                    action=action,
-                    confidence=confidence,
-                    reasons=reasons,
-                    stats=stats,
-                    alternatives=[
-                        "Box‑Cox (if all values > 0).",
-                        "QuantileTransformer for non‑linear normalization.",
-                    ],
-                    risks=["Transformation may harm interpretability."],
-                )
-            )
-        return recs
-
-    def _scaling_recommendations(
-        self,
-        feature_profiles: List[FeatureProfile],
-        target_profile: Optional[TargetProfile],
-    ) -> Recommendation:
-        """Global recommendation about feature scaling."""
-        numeric_cols = [p.column for p in feature_profiles if p.numeric_profile]
-        if not numeric_cols:
-            return self._make_recommendation(
-                category="scaling",
-                action="No numeric features to scale.",
-                confidence=1.0,
-                reasons=["No numeric features in dataset."],
-                stats={},
-            )
-        return self._make_recommendation(
-            category="scaling",
-            action=(
-                "Scale numeric features if using distance‑based models "
-                "(KNN, SVM, NN). Tree‑based models do not require scaling."
-            ),
-            confidence=1.0,
-            reasons=["General ML best practice for numeric features."],
-            stats={"num_numeric_features": len(numeric_cols)},
-            alternatives=[
-                "StandardScaler (normal distribution)",
-                "RobustScaler (outliers)",
-            ],
-        )
-
-    def _encoding_recommendations(
-        self, feature_profiles: List[FeatureProfile]
-    ) -> List[Recommendation]:
-        """Suggest encoding strategies for categorical features."""
-        recs: List[Recommendation] = []
-        low_threshold = getattr(
-            self.config, "low_cardinality_threshold", 10
-        )
-        high_threshold = self.config.high_cardinality_threshold  # not used directly but available
-
-        for prof in feature_profiles:
-            if prof.categorical_profile:
-                cat = prof.categorical_profile
-                stats = {"unique_count": cat.unique_count}
-                if cat.unique_count == 0:
-                    continue
-                if cat.unique_count <= 2:
-                    action = (
-                        f"Column '{prof.column}': binary encoding or keep as 0/1."
-                    )
-                    confidence = 0.95
-                elif cat.unique_count <= low_threshold:
-                    action = (
-                        f"Column '{prof.column}': One-Hot Encoding "
-                        "(low cardinality)."
-                    )
-                    confidence = 0.9
-                else:
-                    action = (
-                        f"Column '{prof.column}': high cardinality "
-                        f"({cat.unique_count} categories). Consider "
-                        "frequency encoding or target encoding."
-                    )
-                    confidence = 0.8
-                recs.append(
-                    self._make_recommendation(
-                        category="encoding",
-                        action=action,
-                        confidence=confidence,
-                        reasons=[
-                            f"Categorical with {cat.unique_count} unique values."
-                        ],
-                        stats=stats,
-                        risks=["One‑hot encoding may explode dimensionality."],
-                        alternatives=[
-                            "OrdinalEncoder if order matters.",
-                            "TargetEncoder (watch for leakage).",
-                        ],
-                    )
-                )
-        # Numeric columns that look categorical
-        for prof in feature_profiles:
-            if prof.numeric_profile and prof.numeric_profile.is_categorical_like:
-                recs.append(
-                    self._make_recommendation(
-                        category="encoding",
-                        action=(
-                            f"Treat '{prof.column}' as categorical (only "
-                            f"{prof.numeric_profile.unique_count} unique values)."
-                        ),
-                        confidence=0.85,
-                        reasons=["Numeric column with very few unique values."],
-                        stats={"unique_count": prof.numeric_profile.unique_count},
-                        alternatives=["One‑Hot encode or leave as integer."],
-                    )
-                )
-        return recs
-
-    def _feature_engineering_recommendations(
-        self,
-        feature_profiles: List[FeatureProfile],
-        correlation_pairs: List[CorrelationPair],
-    ) -> List[Recommendation]:
-        """Suggest feature engineering based on statistical patterns.
-
-        Only activated when `self.enable_feature_engineering` is True.
-
-        .. todo::
-            The ratio/interaction logic here duplicates functionality in
-            :class:`~preml.feature_engineering.FeatureEngineering`.  In a
-            future refactoring, the recommendation engine should delegate
-            to that module instead of maintaining parallel code.
-        """
-        if not self.enable_feature_engineering:
-            return []
-
-        recs: List[Recommendation] = []
-        corr_threshold = self.config.correlation_threshold
-
-        # Strong correlations → redundancy warning
-        strong_pairs = [
-            pair
-            for pair in correlation_pairs
-            if abs(pair.coefficient) >= corr_threshold
-        ]
-        if strong_pairs:
-            top_pair = max(strong_pairs, key=lambda x: abs(x.coefficient))
-            abs_corr = abs(top_pair.coefficient)
-            # Confidence increases with correlation strength
-            confidence = 0.65 + (min(abs_corr, 1.0) - corr_threshold) * (
-                0.3 / (1.0 - corr_threshold + 1e-9)
-            )
-            recs.append(
-                self._make_recommendation(
-                    category="feature_engineering",
-                    action=(
-                        f"High correlation between '{top_pair.feature_a}' and "
-                        f"'{top_pair.feature_b}' (r={top_pair.coefficient:.2f}). "
-                        "These features may be redundant; consider dropping one, "
-                        "using PCA, or applying regularization instead of creating "
-                        "a ratio or interaction."
-                    ),
-                    confidence=min(confidence, 0.95),
-                    reasons=[
-                        "Highly correlated features often carry overlapping information."
-                    ],
-                    stats={"correlation": top_pair.coefficient},
-                    risks=["May introduce multicollinearity."],
-                    alternatives=["PCA to combine features."],
-                )
-            )
-
-        # Ratio suggestion based on similar coefficients of variation
-        numeric_profiles = [
-            p.numeric_profile for p in feature_profiles if p.numeric_profile
-        ]
-        if len(numeric_profiles) >= 2:
-            for i in range(len(numeric_profiles)):
-                for j in range(i + 1, len(numeric_profiles)):
-                    pi, pj = numeric_profiles[i], numeric_profiles[j]
-                    if (
-                        pi.cv is not None
-                        and pj.cv is not None
-                        and abs(pi.cv - pj.cv) < 0.5
-                        and pi.median != 0
-                        and pj.median != 0
-                    ):
-                        recs.append(
-                            self._make_recommendation(
-                                category="feature_engineering",
-                                action=(
-                                    f"Features '{pi.column}' and '{pj.column}' have "
-                                    "similar coefficients of variation. A ratio "
-                                    "(e.g., a/b) may capture relative information."
-                                ),
-                                confidence=0.5,
-                                reasons=[
-                                    "Similar dispersion patterns may hide interactions."
-                                ],
-                                stats={"cv_a": pi.cv, "cv_b": pj.cv},
-                                risks=[
-                                    "Ratio may become unbounded or create "
-                                    "division‑by‑zero."
-                                ],
-                                alternatives=["Create polynomial features."],
-                            )
-                        )
-                        # Only suggest one ratio pair to avoid noise.
-                        return recs
-        return recs
-
-    def _correlation_recommendations(
-        self, correlation_pairs: List[CorrelationPair]
-    ) -> List[Recommendation]:
-        """Advise on highly correlated features (above config threshold)."""
-        recs: List[Recommendation] = []
-        corr_threshold = self.config.correlation_threshold
-        for pair in correlation_pairs:
-            if abs(pair.coefficient) < corr_threshold:
-                continue
-            recs.append(
-                self._make_recommendation(
-                    category="feature_selection",
-                    action=(
-                        f"High correlation between '{pair.feature_a}' and "
-                        f"'{pair.feature_b}' (r={pair.coefficient:.2f}). "
-                        "Consider dropping one to reduce multicollinearity."
-                    ),
-                    confidence=0.9,
-                    reasons=[
-                        "Multicollinearity can destabilize linear models."
-                    ],
-                    stats={"correlation": pair.coefficient},
-                    risks=[
-                        "Dropping may lose unique information if correlation "
-                        "is not perfect."
-                    ],
-                    alternatives=[
-                        "Regularization (L1/L2) to handle collinearity."
-                    ],
-                )
-            )
-        return recs
-
-    def _pipeline_suggestion(
-        self,
-        feature_profiles: List[FeatureProfile],
-        missing_report: Optional[MissingReport] = None,
-        outlier_columns: Optional[List[str]] = None,
-        transformation_recs: Optional[List[Recommendation]] = None,
-    ) -> PipelineSuggestion:
-        """Create a suggested sklearn‑compatible pipeline based on profiles.
-
-        The pipeline reflects detected issues: missing values, skewness,
-        outliers, and categorical columns.
-        """
-        steps: List[Tuple[str, str]] = []
-        num_cols = [p.column for p in feature_profiles if p.numeric_profile]
-        cat_cols = [p.column for p in feature_profiles if p.categorical_profile]
-
-        has_outlier_column = (
-            outlier_columns is not None
-            and any(col in outlier_columns for col in num_cols)
-        )
-        has_skew = (
-            transformation_recs is not None
-            and any(rec.category == "transformation" for rec in transformation_recs)
-        )
-
-        if missing_report and missing_report.total_missing > 0:
-            steps.append(
-                (
-                    "imputation",
-                    "SimpleImputer(strategy='median' for numeric, "
-                    "'most_frequent' for categorical)",
-                )
-            )
-
-        if has_skew and num_cols:
-            steps.append(
-                (
-                    "transformation",
-                    "PowerTransformer(method='yeo-johnson') or "
-                    "FunctionTransformer(log1p)",
-                )
-            )
-
-        if num_cols:
-            scaler = "RobustScaler()" if has_outlier_column else "StandardScaler()"
-            steps.append(("scaler", scaler))
-
-        if cat_cols:
-            steps.append(
-                ("categorical_encoder", "OneHotEncoder(handle_unknown='ignore')")
-            )
-
-        if not steps:
-            steps.append(("passthrough", "No preprocessing required"))
-
-        return PipelineSuggestion(
-            name="Recommended base pipeline",
-            steps=steps,
-            explanation=(
-                "Automatically generated based on feature types, "
-                "missing values, outliers, and skewness."
-            ),
-        )
-
-    # ==================================================================
-    # EVIDENCE‑BASED MODEL RECOMMENDATIONS
-    # ==================================================================
-
-    # ------------------------------------------------------------------
-    # Internal helpers for model recommendation building
-    # ------------------------------------------------------------------
-    def _add_baseline_model(
-        self, models: List[ModelRecommendation], task_type: str
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], None]],
+        step: str,
+        **payload: Any,
     ) -> None:
-        """Append the default linear baseline (Linear/LogisticRegression)."""
-        if task_type == "regression":
-            models.append(
-                ModelRecommendation(
-                    model_name="LinearRegression",
-                    suitability="baseline",
-                    reason="Simple, interpretable baseline.",
-                    conditions=["Scale features."],
-                    hyperparams={},
-                )
-            )
-        else:
-            models.append(
-                ModelRecommendation(
-                    model_name="LogisticRegression",
-                    suitability="baseline",
-                    reason="Probabilistic baseline for classification.",
-                    conditions=["Scale features."],
-                    hyperparams={
-                        "max_iter": 1000,
-                        "random_state": self.config.random_state,
-                    },
-                )
-            )
+        """Emit progress updates while remaining backward compatible."""
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(step, payload)
+        except TypeError:
+            fallback_callback = cast(Any, progress_callback)
+            fallback_callback({"step": step, **payload})
 
-    def _add_tree_ensemble_models(
-        self,
-        models: List[ModelRecommendation],
-        task_type: str,
-        has_multicollinearity: bool,
-        is_large: bool,
-        n_features: int,
-        has_missing: bool,
-    ) -> None:
-        """Add RandomForest, GradientBoosting, and optionally HistGradientBoosting."""
-        reg = task_type == "regression"
-        rf_name = "RandomForestRegressor" if reg else "RandomForestClassifier"
-        gb_name = "GradientBoostingRegressor" if reg else "GradientBoostingClassifier"
-        hist_name = (
-            "HistGradientBoostingRegressor"
-            if reg
-            else "HistGradientBoostingClassifier"
-        )
-
-        models.append(
-            ModelRecommendation(
-                model_name=rf_name,
-                suitability="excellent" if not has_multicollinearity else "good",
-                reason="Handles non‑linearity and does not require scaling.",
-                conditions=["Tune n_estimators (100‑500) and max_depth (5‑30)."],
-                hyperparams={
-                    "n_estimators": 200,
-                    "random_state": self.config.random_state,
-                },
+    def _parallel_jobs(self, n_rows: int, n_cols: int) -> int:
+        """Use fewer jobs on larger problems to reduce memory pressure."""
+        cells = n_rows * max(n_cols, 1)
+        if cells >= 250_000 or n_rows >= 100_000:
+            warnings.warn(
+                "Large dataset detected; limiting parallel cross-validation to n_jobs=1 to reduce memory usage.",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        )
+            return 1
+        return self.config.n_jobs
 
-        gb_suitability = "excellent" if (is_large and n_features > 3) else "good"
-        models.append(
-            ModelRecommendation(
-                model_name=gb_name,
-                suitability=gb_suitability,
-                reason="Sequential ensemble; often best performance on tabular data.",
-                conditions=[
-                    "Tune learning_rate (0.01‑0.2), n_estimators (100‑1000), max_depth (3‑10)."
-                ],
-                hyperparams={
-                    "n_estimators": 200,
-                    "learning_rate": 0.1,
-                    "random_state": self.config.random_state,
-                },
-            )
-        )
-
-        if has_missing:
-            models.append(
-                ModelRecommendation(
-                    model_name=hist_name,
-                    suitability="good",
-                    reason="Native support for missing values; faster than standard GBDT.",
-                    conditions=[
-                        "No need for imputation.",
-                        "Tune max_iter, learning_rate, max_depth.",
-                    ],
-                    hyperparams={
-                        "max_iter": 200,
-                        "learning_rate": 0.1,
-                        "random_state": self.config.random_state,
-                    },
-                )
+    # -----------------------------------------------------------------------
+    # Timeout helper
+    # -----------------------------------------------------------------------
+    def _check_timeout(self, start_time: float, budget: float) -> None:
+        """Raise ValidationTimeoutError if budget exceeded."""
+        if time.time() - start_time > budget:
+            raise ValidationTimeoutError(
+                f"Time budget exceeded ({budget:.1f}s elapsed)"
             )
 
-    def _add_optional_xgboost_lightgbm(
-        self,
-        models: List[ModelRecommendation],
-        task_type: str,
-        is_small: bool,
-    ) -> None:
-        """Add XGBoost and LightGBM models if libraries are available."""
-        reg = task_type == "regression"
-        if XGBOOST_AVAILABLE:
-            xgb_name = "XGBRegressor" if reg else "XGBClassifier"
-            models.append(
-                ModelRecommendation(
-                    model_name=xgb_name,
-                    suitability="excellent",
-                    reason="XGBoost: highly optimized, handles missing values and regularization.",
-                    conditions=[
-                        "Tune n_estimators, max_depth, learning_rate, subsample."
-                    ],
-                    hyperparams={
-                        "n_estimators": 200,
-                        "max_depth": 6,
-                        "learning_rate": 0.1,
-                        "random_state": self.config.random_state,
-                    },
-                )
-            )
-        if LIGHTGBM_AVAILABLE:
-            lgb_name = "LGBMRegressor" if reg else "LGBMClassifier"
-            models.append(
-                ModelRecommendation(
-                    model_name=lgb_name,
-                    suitability="excellent" if not is_small else "good",
-                    reason="LightGBM: fast, handles large data and categorical features.",
-                    conditions=["Tune num_leaves, learning_rate, n_estimators."],
-                    hyperparams={
-                        "n_estimators": 200,
-                        "num_leaves": 31,
-                        "learning_rate": 0.1,
-                        "random_state": self.config.random_state,
-                    },
-                )
-            )
-
-    def _model_recommendations(
-        self,
-        target_profile: Optional[TargetProfile],
-        feature_profiles: List[FeatureProfile],
-        correlation_pairs: List[CorrelationPair],
-        outlier_reports: List[OutlierReport],
-        missing_report: Optional[MissingReport],
-        metadata: Optional[DatasetMetadata] = None,
-    ) -> List[ModelRecommendation]:
-        """Suggest the most suitable models based on data characteristics.
-
-        Returns
-        -------
-        List[ModelRecommendation]
-            Sorted by suitability: 'excellent' → 'good' → 'baseline' → 'conditional'.
-        """
-        if not target_profile:
-            return [
-                ModelRecommendation(
-                    model_name="N/A",
-                    suitability="none",
-                    reason="Target variable not specified; cannot recommend models.",
-                    conditions=[],
-                    hyperparams={},
-                )
-            ]
-
-        is_regression = target_profile.is_regression
-        is_binary = target_profile.is_binary
-
-        # Estimate sample size
-        if metadata and metadata.n_rows:
-            n_samples = metadata.n_rows
-        else:
-            counts = [
-                p.numeric_profile.count
-                for p in feature_profiles
-                if p.numeric_profile and p.numeric_profile.count > 0
-            ]
-            if counts:
-                n_samples = max(counts)
-            else:
-                logger.debug("No numeric profile counts available; assuming n_samples=1000.")
-                n_samples = 1000
-
-        n_features = len([p for p in feature_profiles if not p.is_constant])
-
-        has_multicollinearity = any(
-            abs(pair.coefficient) >= self.config.correlation_threshold
-            for pair in correlation_pairs
-        )
-        has_outliers = any(o.outlier_count > 0 for o in outlier_reports)
-        has_missing = bool(missing_report and missing_report.total_missing > 0)
-
-        is_large = n_samples > 10_000
-        is_small = n_samples < 1_000
-        is_high_dimensional = n_features > 50
-
-        if is_regression:
-            models = self._regression_model_recommendations(
-                n_samples, n_features, has_multicollinearity, has_outliers,
-                has_missing, is_large, is_small, is_high_dimensional,
-            )
-        else:
-            n_classes = target_profile.n_unique
-            models = self._classification_model_recommendations(
-                n_samples, n_features, is_binary, n_classes,
-                has_multicollinearity, has_outliers,
-                has_missing, is_large, is_small, is_high_dimensional,
-            )
-
-        priority = {"excellent": 0, "good": 1, "baseline": 2, "conditional": 3}
-        models.sort(key=lambda m: priority.get(m.suitability, 99))
-        return models
-
-    def _regression_model_recommendations(
-        self,
-        n_samples: int,
-        n_features: int,
-        has_multicollinearity: bool,
-        has_outliers: bool,
-        has_missing: bool,
-        is_large: bool,
-        is_small: bool,
-        is_high_dimensional: bool,
-    ) -> List[ModelRecommendation]:
-        """Build regression model suggestions based on data flags."""
-        models: List[ModelRecommendation] = []
-
-        self._add_baseline_model(models, "regression")
-
-        if has_multicollinearity:
-            models.append(
-                ModelRecommendation(
-                    model_name="ElasticNetCV",
-                    suitability="excellent",
-                    reason="Multicollinearity detected. ElasticNet combines L1/L2 regularization.",
-                    conditions=["Scale features.", "Use l1_ratio in [.1,.5,.7,.9,.99,1]."],
-                    hyperparams={"cv": 5, "random_state": self.config.random_state},
-                )
-            )
-            models.append(
-                ModelRecommendation(
-                    model_name="Ridge",
-                    suitability="good",
-                    reason="L2 regularization handles correlated features.",
-                    conditions=["Scale features.", "Tune alpha via RidgeCV."],
-                    hyperparams={"alpha": 1.0},
-                )
-            )
-            if n_features > 20:
-                models.append(
-                    ModelRecommendation(
-                        model_name="Lasso",
-                        suitability="good",
-                        reason="L1 regularization for automatic feature selection.",
-                        conditions=["Scale features.", "Use LassoCV."],
-                        hyperparams={"cv": 5, "random_state": self.config.random_state},
-                    )
-                )
-
-        if has_outliers:
-            models.append(
-                ModelRecommendation(
-                    model_name="HuberRegressor",
-                    suitability="good",
-                    reason="Outliers detected; Huber loss is robust.",
-                    conditions=["Scale features."],
-                    hyperparams={"epsilon": 1.35},
-                )
-            )
-
-        self._add_tree_ensemble_models(
-            models, "regression", has_multicollinearity,
-            is_large, n_features, has_missing,
-        )
-        self._add_optional_xgboost_lightgbm(models, "regression", is_small)
-
-        if not is_large:
-            models.append(
-                ModelRecommendation(
-                    model_name="SVR",
-                    suitability="good" if n_samples < 5_000 else "conditional",
-                    reason="Can capture complex relationships; works well on small data.",
-                    conditions=["Scale features.", "Tune C and gamma."],
-                    hyperparams={"kernel": "rbf", "C": 1.0},
-                )
-            )
-
-        if is_small:
-            models.append(
-                ModelRecommendation(
-                    model_name="KNeighborsRegressor",
-                    suitability="conditional",
-                    reason="Simple non‑parametric baseline for small data.",
-                    conditions=["Scale features.", "Tune n_neighbors."],
-                    hyperparams={"n_neighbors": 5},
-                )
-            )
-
-        models.append(
-            ModelRecommendation(
-                model_name="DecisionTreeRegressor",
-                suitability="conditional",
-                reason="Highly interpretable; prone to overfitting.",
-                conditions=["Tune max_depth (3‑10)."],
-                hyperparams={"max_depth": 5, "random_state": self.config.random_state},
-            )
-        )
-
-        if is_large:
-            models.append(
-                ModelRecommendation(
-                    model_name="SGDRegressor",
-                    suitability="conditional",
-                    reason="Scales well to large datasets; supports L1/L2/ElasticNet.",
-                    conditions=["Scale features.", "Tune alpha and penalty."],
-                    hyperparams={
-                        "penalty": "elasticnet",
-                        "random_state": self.config.random_state,
-                    },
-                )
-            )
-
-        return models
-
-    def _classification_model_recommendations(
-        self,
-        n_samples: int,
-        n_features: int,
-        is_binary: bool,
-        n_classes: int,
-        has_multicollinearity: bool,
-        has_outliers: bool,
-        has_missing: bool,
-        is_large: bool,
-        is_small: bool,
-        is_high_dimensional: bool,
-    ) -> List[ModelRecommendation]:
-        """Build classification model suggestions."""
-        models: List[ModelRecommendation] = []
-
-        self._add_baseline_model(models, "classification")
-
-        if has_multicollinearity or is_high_dimensional:
-            models.append(
-                ModelRecommendation(
-                    model_name="LogisticRegressionCV",
-                    suitability="good",
-                    reason="Built‑in CV and regularization (L1/L2).",
-                    conditions=["Scale features.", "solver='saga' for ElasticNet."],
-                    hyperparams={
-                        "cv": 5,
-                        "solver": "saga",
-                        "max_iter": 2000,
-                        "random_state": self.config.random_state,
-                    },
-                )
-            )
-
-        self._add_tree_ensemble_models(
-            models, "classification", has_multicollinearity,
-            is_large, n_features, has_missing,
-        )
-        self._add_optional_xgboost_lightgbm(models, "classification", is_small)
-
-        if not is_large:
-            models.append(
-                ModelRecommendation(
-                    model_name="SVC",
-                    suitability="good" if n_samples < 5_000 else "conditional",
-                    reason="RBF kernel captures complex boundaries.",
-                    conditions=[
-                        "Scale features.",
-                        "Tune C and gamma.",
-                        "probability=True for probabilities.",
-                    ],
-                    hyperparams={"kernel": "rbf", "C": 1.0, "probability": True},
-                )
-            )
-
-        if is_small:
-            models.append(
-                ModelRecommendation(
-                    model_name="KNeighborsClassifier",
-                    suitability="conditional",
-                    reason="Simple, local decision boundaries.",
-                    conditions=["Scale features.", "Tune n_neighbors."],
-                    hyperparams={"n_neighbors": 5},
-                )
-            )
-            models.append(
-                ModelRecommendation(
-                    model_name="GaussianNB",
-                    suitability="conditional",
-                    reason="Fast probabilistic classifier, good on small data.",
-                    conditions=["Assumes feature independence."],
-                    hyperparams={},
-                )
-            )
-
-        models.append(
-            ModelRecommendation(
-                model_name="DecisionTreeClassifier",
-                suitability="conditional",
-                reason="Interpretable, but prone to overfitting.",
-                conditions=["Tune max_depth."],
-                hyperparams={"max_depth": 5, "random_state": self.config.random_state},
-            )
-        )
-
-        if is_large:
-            models.append(
-                ModelRecommendation(
-                    model_name="SGDClassifier",
-                    suitability="conditional",
-                    reason="Scales to large data; supports various losses.",
-                    conditions=["Scale features.", "loss='log' for probabilities."],
-                    hyperparams={"loss": "log", "random_state": self.config.random_state},
-                )
-            )
-
-        return models
-
-    # ==================================================================
-    # Main entry point
-    # ==================================================================
-    def generate_recommendations(
-        self,
-        analysis_results: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Produce a full set of recommendations from analysis facts.
+    # -----------------------------------------------------------------------
+    # Meta-feature extraction
+    # -----------------------------------------------------------------------
+    def extract_meta_features(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
+        """Compute dataset meta-features for meta-learning and similarity.
 
         Parameters
         ----------
-        analysis_results : dict
-            The dictionary returned by `StatisticsEngine.run_full_analysis()`.
-            Expected keys: 'metadata', 'duplicates', 'infinite', 'missing',
-            'outliers', 'feature_profiles', 'correlation_pairs', 'target_profile'.
+        X : pd.DataFrame
+            Feature matrix.
+        y : pd.Series
+            Target vector.
 
         Returns
         -------
         dict
-            Keys:
-                - 'imputation': List[Recommendation]
-                - 'outlier_handling': List[Recommendation]
-                - 'transformation': List[Recommendation]
-                - 'scaling': Recommendation
-                - 'encoding': List[Recommendation]
-                - 'feature_engineering': List[Recommendation]
-                - 'feature_selection': List[Recommendation]
-                - 'pipeline': PipelineSuggestion
-                - 'models': List[ModelRecommendation]
-                - 'data_quality_notes': List[str]
-
-        Raises
-        ------
-        RecommendationError
-            If the input dictionary is malformed or required keys are missing.
+            Dictionary with keys: n_samples, n_features, n_numeric,
+            n_categorical, missing_ratio, skewness_mean, kurtosis_mean,
+            target_variance, signal_to_noise_ratio.
         """
-        # ---- Input validation ----
-        try:
-            analysis_results = resolve_analysis_result(analysis_results)
-        except TypeError as exc:
-            raise RecommendationError(
-                "analysis_results must be a dictionary returned by StatisticsEngine.run_full_analysis() or an EDAAnalyzer instance."
-            ) from exc
-
-        required = [
-            "duplicates", "infinite", "missing", "outliers",
-            "feature_profiles", "correlation_pairs", "target_profile",
-        ]
-        for key in required:
-            if key not in analysis_results:
-                raise RecommendationError(
-                    f"Missing required key '{key}' in analysis_results."
-                )
-
-        # Extract facts with safe defaults
-        duplicates: Optional[DuplicateReport] = analysis_results["duplicates"]
-        infinite: Optional[InfiniteReport] = analysis_results["infinite"]
-        missing: Optional[MissingReport] = analysis_results["missing"]
-        if missing is None:
-            missing = MissingReport(
-                columns_with_missing=[], column_reports=[], total_missing=0
-            )
-        outlier_reports: List[OutlierReport] = analysis_results["outliers"]
-        feature_profiles: List[FeatureProfile] = analysis_results["feature_profiles"]
-        correlation_pairs: List[CorrelationPair] = analysis_results["correlation_pairs"]
-        target_profile: Optional[TargetProfile] = analysis_results["target_profile"]
-        metadata: Optional[DatasetMetadata] = analysis_results.get("metadata")
-
-        if not isinstance(feature_profiles, list):
-            raise RecommendationError("'feature_profiles' must be a list.")
-        if not isinstance(outlier_reports, list):
-            raise RecommendationError(
-                "'outliers' must be a list.",
-                details=(
-                    "Pass the full output of StatisticsEngine.run_full_analysis() "
-                    "or EDAAnalyzer.run() so the 'outliers' key is present and typed correctly."
-                ),
-            )
-        if not isinstance(correlation_pairs, list):
-            raise RecommendationError("'correlation_pairs' must be a list.")
-
-        outlier_columns = [o.column for o in outlier_reports if o.outlier_count > 0]
-
-        # Build recommendations
-        imputation_recs = self._imputation_recommendations(
-            feature_profiles, missing, outlier_columns
+        n_samples, n_features = X.shape
+        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = X.select_dtypes(
+            include=["object", "category"]
+        ).columns.tolist()
+        # Treat pandas CategoricalDtype as categorical
+        categorical_cols.extend(
+            [col for col in X.columns if isinstance(X[col].dtype, pd.CategoricalDtype)]
         )
-        outlier_recs = self._outlier_recommendations(outlier_reports)
-        transformation_recs = self._transformation_recommendations(feature_profiles)
-        scaling_rec = self._scaling_recommendations(feature_profiles, target_profile)
-        encoding_recs = self._encoding_recommendations(feature_profiles)
-        feature_eng_recs = self._feature_engineering_recommendations(
-            feature_profiles, correlation_pairs
-        )
-        corr_recs = self._correlation_recommendations(correlation_pairs)
-        pipeline = self._pipeline_suggestion(
-            feature_profiles,
-            missing_report=missing,
-            outlier_columns=outlier_columns,
-            transformation_recs=transformation_recs,
+        categorical_cols = list(set(categorical_cols))  # deduplicate
+
+        self._numeric_cols = numeric_cols
+        self._categorical_cols = categorical_cols
+
+        n_numeric = len(numeric_cols)
+        n_categorical = len(categorical_cols)
+
+        # Missing ratio
+        total_missing = X.isnull().sum().sum()
+        missing_ratio = (
+            total_missing / (n_samples * n_features) if n_features > 0 else 0.0
         )
 
-        model_recs = self._model_recommendations(
-            target_profile=target_profile,
-            feature_profiles=feature_profiles,
-            correlation_pairs=correlation_pairs,
-            outlier_reports=outlier_reports,
-            missing_report=missing,
-            metadata=metadata,
-        )
+        # Skewness & kurtosis of numeric features
+        if n_numeric > 0:
+            skew_vals = X[numeric_cols].skew().dropna()
+            kurt_vals = X[numeric_cols].kurtosis().dropna()
+            skewness_mean = float(skew_vals.mean()) if len(skew_vals) > 0 else 0.0
+            kurtosis_mean = float(kurt_vals.mean()) if len(kurt_vals) > 0 else 0.0
+        else:
+            skewness_mean = 0.0
+            kurtosis_mean = 0.0
 
-        # Data quality notes
-        data_quality_notes: List[str] = []
-        if duplicates and duplicates.total_duplicates > 0:
-            data_quality_notes.append(
-                f"Found {duplicates.total_duplicates} duplicate rows "
-                f"({duplicates.duplicate_percent:.2f}%)."
+        # Target variance / signal-to-noise
+        if pd.api.types.is_numeric_dtype(y):
+            target_variance = float(np.var(y)) if len(y) > 1 else 0.0
+            # Simple signal-to-noise: mean abs correlation of numeric features with target
+            if n_numeric > 0:
+                corrs = []
+                for col in numeric_cols:
+                    if not X[col].isnull().all():
+                        corr = abs(X[col].corr(y)) if len(y) > 1 else 0.0
+                        corrs.append(corr)
+                signal_to_noise = float(np.mean(corrs)) if corrs else 0.0
+            else:
+                signal_to_noise = 0.0
+        else:
+            # Classification: use class entropy as target_variance, dummy SNR
+            value_counts = y.value_counts(normalize=True)
+            target_variance = -float(
+                (value_counts * np.log(value_counts + 1e-9)).sum()
             )
-        if infinite and infinite.columns_with_inf:
-            data_quality_notes.append(
-                f"Infinite values in columns: {infinite.columns_with_inf}. "
-                "Treat as missing or drop."
-            )
-        if missing.total_missing > 0:
-            data_quality_notes.append(
-                f"Total missing values: {missing.total_missing} across "
-                f"{len(missing.columns_with_missing)} columns."
-            )
+            signal_to_noise = 1.0  # placeholder
 
-        return {
-            "imputation": imputation_recs,
-            "outlier_handling": outlier_recs,
-            "transformation": transformation_recs,
-            "scaling": scaling_rec,
-            "encoding": encoding_recs,
-            "feature_engineering": feature_eng_recs,
-            "feature_selection": corr_recs,
-            "pipeline": pipeline,
-            "models": model_recs,
-            "data_quality_notes": data_quality_notes,
+        self._meta_features = {
+            "n_samples": n_samples,
+            "n_features": n_features,
+            "n_numeric": n_numeric,
+            "n_categorical": n_categorical,
+            "n_unique_ratios": float(
+                np.mean([
+                    X[col].nunique(dropna=True) / max(n_samples, 1)
+                    for col in categorical_cols
+                ]) if categorical_cols else 0.0
+            ),
+            "missing_ratio": missing_ratio,
+            "skewness_mean": skewness_mean,
+            "kurtosis_mean": kurtosis_mean,
+            "target_variance": target_variance,
+            "signal_to_noise_ratio": signal_to_noise,
         }
+        return self._meta_features
 
-    # ------------------------------------------------------------------
-    # Public helper: produce a formatted summary
-    # ------------------------------------------------------------------
-    @staticmethod
-    def summarize(recommendations: Dict[str, Any]) -> str:
-        """Return a human‑readable summary of the recommendations.
+    # -----------------------------------------------------------------------
+    # Adaptive hyperparameter ranges
+    # -----------------------------------------------------------------------
+    def _get_adaptive_hyperparams(
+        self, model_name: str, n_samples: int, n_features: int
+    ) -> Dict[str, Any]:
+        """Return dataset-adaptive hyperparameter ranges.
 
-        .. note::
-            This static method is a presentation utility.  It may be
-            relocated to a dedicated formatter module in a future version.
+        Based on size regime (small < 5000, medium 5000-50000, large >= 50000).
 
         Parameters
         ----------
-        recommendations : dict
-            The dictionary returned by `generate_recommendations()`.
+        model_name : str
+            One of the supported model names (e.g. "HistGradientBoosting", "LGBM").
+        n_samples : int
+        n_features : int
 
         Returns
         -------
-        str
-            Formatted text that can be printed or saved.
+        dict
+            Keys are hyperparameter names, values are either tuples (low, high)
+            for continuous/integer ranges or lists of discrete choices.
         """
-        lines: List[str] = []
-        lines.append("=" * 60)
-        lines.append("  DATA QUALITY NOTES")
-        lines.append("=" * 60)
-        for note in recommendations.get("data_quality_notes", []):
-            lines.append(f"  - {note}")
+        if n_samples < 5_000:
+            size = "small"
+        elif n_samples < 50_000:
+            size = "medium"
+        else:
+            size = "large"
 
-        sections = [
-            ("IMPUTATION", recommendations.get("imputation", [])),
-            ("OUTLIER HANDLING", recommendations.get("outlier_handling", [])),
-            ("TRANSFORMATIONS", recommendations.get("transformation", [])),
-            (
-                "SCALING",
-                [recommendations.get("scaling")]
-                if recommendations.get("scaling")
-                else [],
-            ),
-            ("ENCODING", recommendations.get("encoding", [])),
-            ("FEATURE ENGINEERING", recommendations.get("feature_engineering", [])),
-            (
-                "FEATURE SELECTION (COLLINEARITY)",
-                recommendations.get("feature_selection", []),
-            ),
-        ]
-        for title, rec_list in sections:
-            if not rec_list:
-                continue
-            lines.append("")
-            lines.append("=" * 60)
-            lines.append(f"  {title}")
-            lines.append("=" * 60)
-            for idx, rec in enumerate(rec_list, start=1):
-                if rec is None:
-                    continue
-                lines.append(f"  [{idx}] {rec.action}")
-                lines.append(f"       Confidence: {rec.confidence:.0%}")
-                if rec.risks:
-                    lines.append(f"       Risks: {'; '.join(rec.risks)}")
-                if rec.alternative_options:
-                    lines.append(
-                        f"       Alternatives: {'; '.join(rec.alternative_options)}"
+        base = {}
+
+        if "histgradientboosting" in model_name.lower():
+            if size == "small":
+                base["learning_rate"] = (0.01, 0.3)
+                base["max_depth"] = (3, 8)
+                base["min_samples_leaf"] = (2, 20)
+            elif size == "medium":
+                base["learning_rate"] = (0.005, 0.2)
+                base["max_depth"] = (4, 12)
+                base["min_samples_leaf"] = (2, 30)
+            else:
+                base["learning_rate"] = (0.001, 0.1)
+                base["max_depth"] = (6, 15)
+                base["min_samples_leaf"] = (5, 50)
+            base["max_iter"] = (100, 1000) if size == "small" else (200, 2000)
+
+        elif "gradientboosting" in model_name.lower():
+            if size == "small":
+                base["learning_rate"] = (0.01, 0.3)
+                base["n_estimators"] = (50, 200)
+                base["max_depth"] = (3, 8)
+            elif size == "medium":
+                base["learning_rate"] = (0.005, 0.2)
+                base["n_estimators"] = (100, 500)
+                base["max_depth"] = (4, 12)
+            else:
+                base["learning_rate"] = (0.001, 0.1)
+                base["n_estimators"] = (200, 1000)
+                base["max_depth"] = (6, 15)
+            base["subsample"] = (0.5, 1.0)
+
+        elif "randomforest" in model_name.lower():
+            base["n_estimators"] = (50, 200) if size == "small" else (100, 500)
+            base["max_depth"] = (3, 8) if size == "small" else (4, 20)
+            base["min_samples_split"] = (2, 10) if size == "small" else (2, 20)
+
+        elif "lgbm" in model_name.lower():
+            base["n_estimators"] = (50, 200) if size == "small" else (100, 500)
+            base["learning_rate"] = (0.01, 0.3) if size == "small" else (0.005, 0.2)
+            base["num_leaves"] = (15, 63) if size == "small" else (31, 127)
+            base["subsample"] = (0.5, 1.0)
+
+        elif "xgboost" in model_name.lower():
+            base["n_estimators"] = (50, 200) if size == "small" else (100, 500)
+            base["learning_rate"] = (0.01, 0.3) if size == "small" else (0.005, 0.2)
+            base["max_depth"] = (3, 8) if size == "small" else (4, 12)
+            base["subsample"] = (0.5, 1.0)
+            base["colsample_bytree"] = (0.5, 1.0)
+
+        elif "logistic" in model_name.lower():
+            base["C"] = [0.01, 0.1, 1.0, 10.0]
+        elif "elasticnet" in model_name.lower():
+            base["l1_ratio"] = [0.1, 0.5, 0.7, 0.9, 0.99, 1.0]
+        elif "ridge" in model_name.lower():
+            base["alpha"] = [0.1, 1.0, 10.0, 100.0]
+        elif "lasso" in model_name.lower():
+            base["alpha"] = [0.001, 0.01, 0.1, 1.0]
+        elif "svc" in model_name.lower() or "svr" in model_name.lower():
+            base["C"] = [0.1, 1.0, 10.0]
+            base["gamma"] = ["scale", "auto"]
+
+        return base
+
+    # -----------------------------------------------------------------------
+    # Candidate generation
+    # -----------------------------------------------------------------------
+    def _generate_candidates(self) -> List[ModelCandidate]:
+        """Generate all candidate models with adaptive hyperparameters."""
+        candidates: List[ModelCandidate] = []
+        n_samples = self._meta_features.get("n_samples", 1000)
+        n_features = self._meta_features.get("n_features", 10)
+        is_reg = self._is_regression
+
+        # Tree ensembles – primary candidates
+        # 1. HistGradientBoosting (always included)
+        hgb_hyper = self._get_adaptive_hyperparams(
+            "HistGradientBoosting", n_samples, n_features
+        )
+        candidates.append(
+            ModelCandidate(
+                name=(
+                    "HistGradientBoostingRegressor"
+                    if is_reg
+                    else "HistGradientBoostingClassifier"
+                ),
+                estimator_class=(
+                    HistGradientBoostingRegressor
+                    if is_reg
+                    else HistGradientBoostingClassifier
+                ),
+                priority=1.0,
+                hyperparams={"random_state": self.random_state, **hgb_hyper},
+                supports_categorical=True,
+                supports_missing=True,
+                needs_scaling=False,
+                is_ensemble=True,
+            )
+        )
+
+        # 2. GradientBoosting
+        gb_hyper = self._get_adaptive_hyperparams(
+            "GradientBoosting", n_samples, n_features
+        )
+        candidates.append(
+            ModelCandidate(
+                name=(
+                    "GradientBoostingRegressor"
+                    if is_reg
+                    else "GradientBoostingClassifier"
+                ),
+                estimator_class=(
+                    GradientBoostingRegressor
+                    if is_reg
+                    else GradientBoostingClassifier
+                ),
+                priority=0.7,
+                hyperparams={"random_state": self.random_state, **gb_hyper},
+                supports_categorical=False,
+                supports_missing=False,
+                needs_scaling=False,
+                is_ensemble=True,
+            )
+        )
+
+        # 3. RandomForest
+        rf_hyper = self._get_adaptive_hyperparams(
+            "RandomForest", n_samples, n_features
+        )
+        candidates.append(
+            ModelCandidate(
+                name=(
+                    "RandomForestRegressor" if is_reg else "RandomForestClassifier"
+                ),
+                estimator_class=(
+                    RandomForestRegressor if is_reg else RandomForestClassifier
+                ),
+                priority=0.6,
+                hyperparams={"random_state": self.random_state, **rf_hyper},
+                supports_categorical=False,
+                supports_missing=False,
+                needs_scaling=False,
+                is_ensemble=True,
+            )
+        )
+
+        # 4. LightGBM (optional)
+        if LIGHTGBM_AVAILABLE:
+            lightgbm_module = _import_optional_module("lightgbm")
+            if lightgbm_module is not None:
+                lgb_regressor = getattr(lightgbm_module, "LGBMRegressor", None)
+                lgb_classifier = getattr(lightgbm_module, "LGBMClassifier", None)
+            else:
+                lgb_regressor = None
+                lgb_classifier = None
+        else:
+            lgb_regressor = None
+            lgb_classifier = None
+
+        if lgb_regressor is not None and lgb_classifier is not None:
+            lgb_hyper = self._get_adaptive_hyperparams("LGBM", n_samples, n_features)
+            candidates.append(
+                ModelCandidate(
+                    name="LGBMRegressor" if is_reg else "LGBMClassifier",
+                    estimator_class=lgb_regressor if is_reg else lgb_classifier,
+                    priority=0.85,
+                    hyperparams={
+                        "random_state": self.random_state,
+                        "verbose": -1,
+                        **lgb_hyper,
+                    },
+                    supports_categorical=True,
+                    supports_missing=True,
+                    needs_scaling=False,
+                    is_ensemble=True,
+                )
+            )
+
+        # 5. XGBoost (optional)
+        if XGBOOST_AVAILABLE:
+            xgboost_module = _import_optional_module("xgboost")
+            if xgboost_module is not None:
+                xgb_regressor = getattr(xgboost_module, "XGBRegressor", None)
+                xgb_classifier = getattr(xgboost_module, "XGBClassifier", None)
+            else:
+                xgb_regressor = None
+                xgb_classifier = None
+        else:
+            xgb_regressor = None
+            xgb_classifier = None
+
+        if xgb_regressor is not None and xgb_classifier is not None:
+            xgb_hyper = self._get_adaptive_hyperparams(
+                "XGBoost", n_samples, n_features
+            )
+            candidates.append(
+                ModelCandidate(
+                    name="XGBRegressor" if is_reg else "XGBClassifier",
+                    estimator_class=xgb_regressor if is_reg else xgb_classifier,
+                    priority=0.75,
+                    hyperparams={
+                        "random_state": self.random_state,
+                        "verbosity": 0,
+                        **xgb_hyper,
+                    },
+                    supports_categorical=False,
+                    supports_missing=True,
+                    needs_scaling=False,
+                    is_ensemble=True,
+                )
+            )
+
+        # Linear models
+        if is_reg:
+            candidates.append(
+                ModelCandidate(
+                    name="LinearRegression",
+                    estimator_class=LinearRegression,
+                    priority=0.3,
+                    hyperparams={},
+                    supports_categorical=False,
+                    supports_missing=False,
+                    needs_scaling=True,
+                    is_linear=True,
+                )
+            )
+            candidates.append(
+                ModelCandidate(
+                    name="RidgeCV",
+                    estimator_class=RidgeCV,
+                    priority=0.4,
+                    hyperparams={"alphas": [0.1, 1.0, 10.0]},
+                    supports_categorical=False,
+                    supports_missing=False,
+                    needs_scaling=True,
+                    is_linear=True,
+                )
+            )
+            candidates.append(
+                ModelCandidate(
+                    name="ElasticNetCV",
+                    estimator_class=ElasticNetCV,
+                    priority=0.45,
+                    hyperparams={"cv": 3, "l1_ratio": [0.1, 0.5, 0.7, 0.9]},
+                    supports_categorical=False,
+                    supports_missing=False,
+                    needs_scaling=True,
+                    is_linear=True,
+                )
+            )
+        else:
+            candidates.append(
+                ModelCandidate(
+                    name="LogisticRegression",
+                    estimator_class=LogisticRegression,
+                    priority=0.3,
+                    hyperparams={"max_iter": 1000, "random_state": self.random_state},
+                    supports_categorical=False,
+                    supports_missing=False,
+                    needs_scaling=True,
+                    is_linear=True,
+                )
+            )
+            candidates.append(
+                ModelCandidate(
+                    name="LogisticRegressionCV",
+                    estimator_class=LogisticRegressionCV,
+                    priority=0.45,
+                    hyperparams={
+                        "cv": 3,
+                        "max_iter": 1000,
+                        "random_state": self.random_state,
+                    },
+                    supports_categorical=False,
+                    supports_missing=False,
+                    needs_scaling=True,
+                    is_linear=True,
+                )
+            )
+
+        # Simple baselines (small datasets)
+        if n_samples < 5000:
+            if is_reg:
+                candidates.append(
+                    ModelCandidate(
+                        name="SVR",
+                        estimator_class=SVR,
+                        priority=0.2,
+                        hyperparams={"kernel": "rbf", "C": 1.0},
+                        supports_categorical=False,
+                        supports_missing=False,
+                        needs_scaling=True,
                     )
-                lines.append("")
+                )
+            else:
+                candidates.append(
+                    ModelCandidate(
+                        name="SVC",
+                        estimator_class=SVC,
+                        priority=0.2,
+                        hyperparams={
+                            "kernel": "rbf",
+                            "C": 1.0,
+                            "probability": True,
+                        },
+                        supports_categorical=False,
+                        supports_missing=False,
+                        needs_scaling=True,
+                    )
+                )
 
-        # Pipeline
-        pipeline = recommendations.get("pipeline")
-        if pipeline:
-            lines.append("=" * 60)
-            lines.append("  SUGGESTED PIPELINE")
-            lines.append("=" * 60)
-            lines.append(f"  Name: {pipeline.name}")
-            lines.append(f"  Explanation: {pipeline.explanation}")
-            lines.append("  Steps:")
-            for step in pipeline.steps:
-                lines.append(f"    - {step[0]}: {step[1]}")
-            lines.append("")
+        # Sort by priority
+        candidates.sort(key=lambda c: c.priority, reverse=True)
+        return candidates
 
-        # Models
-        models = recommendations.get("models", [])
-        if models:
-            lines.append("=" * 60)
-            lines.append("  MODEL RECOMMENDATIONS")
-            lines.append("=" * 60)
-            for m in models:
-                lines.append(f"  [{m.suitability.upper()}] {m.model_name}")
-                lines.append(f"       {m.reason}")
-                if m.conditions:
-                    lines.append(f"       Conditions: {'; '.join(m.conditions)}")
-                if m.hyperparams:
-                    hp = ", ".join(f"{k}={v}" for k, v in m.hyperparams.items())
-                    lines.append(f"       Suggested hyperparams: {hp}")
-                lines.append("")
+    # -----------------------------------------------------------------------
+    # Pipeline building (used inside every CV step)
+    # -----------------------------------------------------------------------
+    def _build_pipeline(self, candidate: ModelCandidate) -> Pipeline:
+        """Build a full sklearn Pipeline with ColumnTransformer.
 
+        Preprocessing steps are **not** applied globally – the pipeline is
+        used directly in cross-validation to avoid data leakage.
+
+        Parameters
+        ----------
+        candidate : ModelCandidate
+            Metadata describing the model's requirements.
+
+        Returns
+        -------
+        sklearn.pipeline.Pipeline
+            Pipeline that ends with the (untuned) estimator.
+        """
+        numeric_cols = self._numeric_cols
+        categorical_cols = self._categorical_cols
+
+        transformers = []
+        # --- Numeric handling ---
+        if numeric_cols:
+            num_steps = []
+            # Imputation: only if model does NOT natively support missing values
+            if not candidate.supports_missing and self._meta_features.get("missing_ratio", 0) > 0:
+                num_steps.append(("imputer_num", SimpleImputer(strategy="median")))
+            # Scaling: only if model needs it
+            if candidate.needs_scaling:
+                # Choose scaler based on skewness & outliers
+                skew = self._meta_features.get("skewness_mean", 0.0)
+                if abs(skew) > 1.5:
+                    num_steps.append(("scaler", PowerTransformer(method="yeo-johnson")))
+                else:
+                    num_steps.append(("scaler", StandardScaler()))
+            if num_steps:
+                # Chain steps inside a sub-pipeline
+                num_pipe = Pipeline(num_steps) if len(num_steps) > 1 else num_steps[0][1]
+                transformers.append(("num", num_pipe, numeric_cols))
+            else:
+                # Pass through numeric columns as-is
+                transformers.append(("num", "passthrough", numeric_cols))
+
+        # --- Categorical handling ---
+        if categorical_cols:
+            avg_unique = self._meta_features.get("n_unique_ratios", 0.0) * self._meta_features.get("n_samples", 1)
+            if candidate.supports_categorical:
+                # Keep categorical columns in the output frame so estimators can refer to them by name.
+                enc = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+                transformers.append(("cat", enc, categorical_cols))
+            else:
+                # One-hot encoding if average cardinality is low, else ordinal.
+                if avg_unique <= self.config.low_cardinality_threshold:
+                    enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+                else:
+                    enc = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+                transformers.append(("cat", enc, categorical_cols))
+
+        # No columns left? Use a pass-through transformer.
+        if not transformers:
+            all_cols = numeric_cols + categorical_cols
+            transformers.append(("passthrough", "passthrough", all_cols))
+
+        preprocessor = ColumnTransformer(
+            transformers=transformers,
+            remainder="drop",
+            verbose_feature_names_out=False,
+        )
+        if hasattr(preprocessor, "set_output"):
+            preprocessor.set_output(transform="pandas")
+
+        # Build the estimator with fixed hyperparams (but NOT tuned ones)
+        fixed_params = {
+            k: v
+            for k, v in candidate.hyperparams.items()
+            if not isinstance(v, (tuple, list))
+        }
+        # For models that support native categorical, we need to pass `categorical_features`
+        # after we know the output column order. We'll set it as an init argument if needed.
+        estimator = candidate.estimator_class(**fixed_params)
+
+        if candidate.supports_categorical and categorical_cols:
+            # After ColumnTransformer: numeric cols first, then cat (each becomes one column)
+            cat_start_idx = len(numeric_cols)
+            cat_end_idx = cat_start_idx + len(categorical_cols)
+            cat_indices = list(range(cat_start_idx, cat_end_idx))
+            # Only set if the estimator supports this parameter
+            if hasattr(estimator, "categorical_features"):
+                estimator.set_params(categorical_features=cat_indices)
+            elif hasattr(estimator, "categorical_feature"):
+                estimator.set_params(categorical_feature=categorical_cols)
+
+        pipeline = Pipeline(
+            steps=[("preprocessor", preprocessor), ("estimator", estimator)]
+        )
+        return pipeline
+
+    # -----------------------------------------------------------------------
+    # Instantiate model for simple use (not used inside pipelines)
+    # -----------------------------------------------------------------------
+    def _instantiate_model(self, candidate: ModelCandidate) -> BaseEstimator:
+        """Instantiate the model with its default hyperparameters."""
+        return candidate.estimator_class(**candidate.hyperparams)
+
+    # -----------------------------------------------------------------------
+    # Early Stopping Cross-Validation (ESCV)
+    # -----------------------------------------------------------------------
+    def _fast_cv_selector(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        candidates: List[ModelCandidate],
+        time_budget: float,
+    ) -> List[EvaluationResult]:
+        """ESCV according to Bergman et al. (2024) with progressive folds.
+
+        Phase 1 – Screening on a 30% sample with progressive CV (2→3→5 folds).
+        Phase 2 – Deep evaluation of top-3 on full data with 5-fold CV.
+
+        Parameters
+        ----------
+        X, y : training data
+        candidates : list of ModelCandidate
+        time_budget : float
+            Allocated time in seconds.
+
+        Returns
+        -------
+        List[EvaluationResult]
+            Sorted by cv_score descending.
+        """
+        start = time.time()
+        screening_budget = time_budget * 0.3
+        deep_budget = time_budget - screening_budget
+
+        # Phase 1: Screening on a smaller sample
+        X_sample, _, y_sample, _ = train_test_split(
+            X,
+            y,
+            train_size=0.3,
+            random_state=self.random_state,
+            stratify=y if not self._is_regression else None,
+        )
+        screening_scores: Dict[str, List[float]] = {}
+        n_jobs = self._parallel_jobs(len(X_sample), X_sample.shape[1])
+        for cand in candidates:
+            self._check_timeout(start, screening_budget)
+            pipe = self._build_pipeline(cand)
+            cv_scores: List[float] = []
+            prev_score = None
+            for n_splits in [2, 3, 5]:
+                cv = (
+                    StratifiedKFold(n_splits, shuffle=True, random_state=self.random_state)
+                    if not self._is_regression
+                    else KFold(n_splits, shuffle=True, random_state=self.random_state)
+                )
+                try:
+                    scores = cross_val_score(
+                        pipe,
+                        X_sample,
+                        y_sample,
+                        cv=cv,
+                        scoring=self._scoring,
+                        n_jobs=n_jobs,
+                    )
+                    mean_score = float(np.mean(scores))
+                    cv_scores.append(mean_score)
+                    if prev_score is not None and len(cv_scores) > 1:
+                        improvement = (mean_score - prev_score) / (abs(prev_score) + 1e-9)
+                        if abs(improvement) < 0.02:
+                            break
+                    prev_score = mean_score
+                except Exception as e:
+                    logger.debug("Screening CV failed for %s: %s", cand.name, e)
+            if cv_scores:
+                screening_scores[cand.name] = cv_scores
+
+        # Phase 2: Deep evaluation on top-3 candidates
+        deep_candidates = sorted(
+            screening_scores, key=lambda n: np.mean(screening_scores[n]), reverse=True
+        )[:3]
+        top_candidates = [c for c in candidates if c.name in deep_candidates]
+
+        results = []
+        for cand in top_candidates:
+            self._check_timeout(start, deep_budget)
+            pipe = self._build_pipeline(cand)
+            try:
+                cv = (
+                    StratifiedKFold(5, shuffle=True, random_state=self.random_state)
+                    if not self._is_regression
+                    else KFold(5, shuffle=True, random_state=self.random_state)
+                )
+                scores = cross_val_score(
+                    pipe,
+                    X,
+                    y,
+                    cv=cv,
+                    scoring=self._scoring,
+                    n_jobs=self._parallel_jobs(len(X), X.shape[1]),
+                )
+                mean_score = float(np.mean(scores))
+                std_score = float(np.std(scores))
+                results.append(
+                    EvaluationResult(
+                        model=cand,
+                        cv_score=mean_score,
+                        cv_std=std_score,
+                        training_time=0.0,  # will be updated later if needed
+                        n_folds_completed=5,
+                    )
+                )
+            except Exception as e:
+                logger.warning("Deep CV failed for %s: %s", cand.name, e)
+
+        results.sort(key=lambda r: r.cv_score, reverse=True)
+        return results
+
+    # -----------------------------------------------------------------------
+    # Learning Curve Cross-Validation (LCCV)
+    # -----------------------------------------------------------------------
+    def _lccv_evaluate(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        candidate: ModelCandidate,
+    ) -> EvaluationResult:
+        """LCCV using `learning_curve` from sklearn and power-law extrapolation.
+
+        Parameters
+        ----------
+        X, y : data
+        candidate : ModelCandidate
+
+        Returns
+        -------
+        EvaluationResult with `learning_curve` and `extrapolated_score`.
+        """
+        pipe = self._build_pipeline(candidate)
+        train_sizes = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+        try:
+            # Use sklearn's learning_curve
+            learning_curve_result = learning_curve(
+                pipe,
+                X,
+                y,
+                train_sizes=train_sizes,
+                cv=3,
+                scoring=self._scoring,
+                n_jobs=self._parallel_jobs(len(X), X.shape[1]),
+                random_state=self.random_state,
+            )
+            train_sizes_abs = learning_curve_result[0]
+            train_scores = learning_curve_result[1]
+            test_scores = learning_curve_result[2]
+        except Exception as e:
+            logger.warning("LCCV failed for %s: %s", candidate.name, e)
+            return EvaluationResult(
+                model=candidate,
+                cv_score=float("-inf"),
+                cv_std=0.0,
+                training_time=0.0,
+                n_folds_completed=0,
+                extrapolated_score=float("-inf"),
+            )
+
+        # Mean test scores across folds
+        test_mean = np.mean(test_scores, axis=1)
+        # Fit power law: score(n) = a + b * n^(-c)
+        from scipy.optimize import curve_fit
+
+        def power_law(n, a, b, c):
+            return a + b * np.power(n, -c)
+
+        # Use all points for fitting
+        x_vals = train_sizes_abs.astype(float)
+        y_vals = test_mean
+        try:
+            popt, _ = curve_fit(power_law, x_vals, y_vals, maxfev=10000)
+            extrapolated = float(power_law(len(X), *popt))
+        except Exception:
+            extrapolated = float(y_vals[-1])  # fallback
+
+        # Build learning curve list
+        learning_curve_points = list(
+            zip(train_sizes, test_mean.tolist())
+        )
+
+        return EvaluationResult(
+            model=candidate,
+            cv_score=extrapolated,  # use extrapolated as best estimate
+            cv_std=0.0,
+            training_time=0.0,
+            n_folds_completed=3,
+            learning_curve=learning_curve_points,
+            extrapolated_score=extrapolated,
+        )
+
+    # -----------------------------------------------------------------------
+    # Successive Halving with HalvingRandomSearchCV
+    # -----------------------------------------------------------------------
+    def _successive_halving_optimize(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        candidate: ModelCandidate,
+        time_budget: float,
+    ) -> Dict[str, Any]:
+        """Multi-fidelity HP optimisation using sklearn's HalvingRandomSearchCV.
+
+        Parameters
+        ----------
+        X, y : data
+        candidate : ModelCandidate
+        time_budget : float
+
+        Returns
+        -------
+        dict of best hyperparameters found.
+        """
+        start = time.time()
+        # Build search space from adaptive ranges
+        param_ranges = candidate.hyperparams
+        import scipy.stats as stats
+
+        param_distributions = {}
+        for key, val in param_ranges.items():
+            if isinstance(val, tuple) and len(val) == 2:
+                low, high = val
+                if isinstance(low, int) and isinstance(high, int):
+                    param_distributions[f"estimator__{key}"] = stats.randint(low, high + 1)
+                else:
+                    # Use uniform distribution; for learning rates we might prefer log-uniform,
+                    # but uniform is acceptable.
+                    param_distributions[f"estimator__{key}"] = stats.uniform(low, high - low)
+            elif isinstance(val, list):
+                param_distributions[f"estimator__{key}"] = val
+
+        if not param_distributions:
+            return {}
+
+        # Build base pipeline (estimator with no hyperparams to tune)
+        base_pipe = self._build_pipeline(candidate)
+        model_selection_module = __import__("sklearn.model_selection", fromlist=["HalvingRandomSearchCV"])
+        HalvingRandomSearchCV = getattr(model_selection_module, "HalvingRandomSearchCV")
+
+        # HalvingRandomSearchCV needs a base estimator; we give it the pipeline.
+        halving_cv = HalvingRandomSearchCV(
+            base_pipe,
+            param_distributions,
+            factor=2,
+            resource="n_samples",
+            min_resources=max(100, int(0.1 * len(X))),
+            max_resources=len(X),
+            n_candidates="exhaust",
+            random_state=self.random_state,
+            cv=3,
+            scoring=self._scoring,
+            n_jobs=self._parallel_jobs(len(X), X.shape[1]),
+            verbose=0,
+        )
+        try:
+            halving_cv.fit(X, y)
+            best_params = halving_cv.best_params_
+            # Strip 'estimator__' prefix
+            clean_params = {
+                k.split("__", 1)[1] if "__" in k else k: v
+                for k, v in best_params.items()
+            }
+            return clean_params
+        except Exception as e:
+            logger.warning("Successive Halving failed for %s: %s", candidate.name, e)
+            return {}
+
+    # -----------------------------------------------------------------------
+    # Bayesian Optimisation fine-tuning
+    # -----------------------------------------------------------------------
+    def _bayesian_optimization_finetune(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        candidate: ModelCandidate,
+        initial_params: Dict[str, Any],
+        time_budget: float,
+    ) -> Dict[str, Any]:
+        """Fine-tune with BayesSearchCV (skopt) if available, else fall back to HalvingRandomSearchCV.
+
+        Parameters
+        ----------
+        X, y : data
+        candidate : ModelCandidate
+        initial_params : dict
+            Starting point for search.
+        time_budget : float
+
+        Returns
+        -------
+        dict of best hyperparameters.
+        """
+        if not SKOPT_AVAILABLE:
+            logger.info("scikit-optimize not available; using extended HalvingRandomSearchCV.")
+            return self._successive_halving_optimize(X, y, candidate, time_budget)
+
+        skopt_module = _import_optional_module("skopt")
+        if skopt_module is None:
+            logger.info("scikit-optimize import failed; using extended HalvingRandomSearchCV.")
+            return self._successive_halving_optimize(X, y, candidate, time_budget)
+        space_module = _import_optional_module("skopt.space")
+        if space_module is None:
+            logger.info("scikit-optimize space import failed; using extended HalvingRandomSearchCV.")
+            return self._successive_halving_optimize(X, y, candidate, time_budget)
+
+        BayesSearchCV = getattr(skopt_module, "BayesSearchCV")
+        Real = getattr(space_module, "Real")
+        Integer = getattr(space_module, "Integer")
+        Categorical = getattr(space_module, "Categorical")
+
+        # Convert candidate's hyperparam ranges into skopt space
+        space = {}
+        for key, val in candidate.hyperparams.items():
+            if isinstance(val, tuple) and len(val) == 2:
+                low, high = val
+                if isinstance(low, int) and isinstance(high, int):
+                    space[f"estimator__{key}"] = Integer(low, high)
+                else:
+                    if "learning_rate" in key:
+                        space[f"estimator__{key}"] = Real(low, high, prior="log-uniform")
+                    else:
+                        space[f"estimator__{key}"] = Real(low, high, prior="uniform")
+            elif isinstance(val, list):
+                space[f"estimator__{key}"] = Categorical(val)
+
+        if not space:
+            return initial_params
+
+        base_pipe = self._build_pipeline(candidate)
+        n_iter = min(25, max(10, int(time_budget / 2)))  # rough estimate
+
+        opt = BayesSearchCV(
+            base_pipe,
+            space,
+            n_iter=n_iter,
+            cv=3,
+            scoring=self._scoring,
+            random_state=self.random_state,
+            n_jobs=self._parallel_jobs(len(X), X.shape[1]),
+        )
+        try:
+            opt.fit(X, y)
+            best = opt.best_params_
+            clean = {
+                k.split("__", 1)[1] if "__" in k else k: v for k, v in best.items()
+            }
+            # Merge with initial (which may contain fixed params)
+            return {**initial_params, **clean}
+        except Exception as e:
+            logger.warning("Bayesian optimisation failed: %s", e)
+            return self._successive_halving_optimize(X, y, candidate, time_budget)
+
+    # -----------------------------------------------------------------------
+    # Preprocessing recommendations (concise)
+    # -----------------------------------------------------------------------
+    def get_preprocessing_recommendations(self) -> Dict[str, str]:
+        """Return simplified preprocessing recommendations based on meta-features.
+
+        Returns a dict with keys like 'imputation', 'scaling', 'encoding'.
+        """
+        recs = {}
+        meta = self._meta_features
+        missing = meta.get("missing_ratio", 0)
+        skew = meta.get("skewness_mean", 0)
+        n_cat = meta.get("n_categorical", 0)
+
+        if missing > 0:
+            if missing < 0.05:
+                recs["imputation"] = "SimpleImputer (median/most_frequent)"
+            else:
+                recs["imputation"] = "IterativeImputer or native model support"
+        else:
+            recs["imputation"] = "None required"
+
+        if abs(skew) > 1.5:
+            recs["transformation"] = "PowerTransformer (yeo-johnson) or log1p"
+        else:
+            recs["transformation"] = "None required"
+
+        recs["scaling"] = (
+            "StandardScaler or RobustScaler" if self._is_regression is not None else "depends on model"
+        )
+
+        if n_cat > 0:
+            recs["encoding"] = (
+                "OneHotEncoder (low cardinality) or OrdinalEncoder"
+                if not any(
+                    c.supports_categorical for c in self._candidates
+                )
+                else "Native categorical support available"
+            )
+        else:
+            recs["encoding"] = "No categorical features"
+
+        return recs
+
+    # -----------------------------------------------------------------------
+    # Legacy heuristic recommendation helpers (backward compatibility)
+    # -----------------------------------------------------------------------
+    def _imputation_recommendations(
+        self,
+        feature_profiles: List[Any],
+        missing_report: Any,
+    ) -> List[Recommendation]:
+        recs: List[Recommendation] = []
+        if missing_report is None or getattr(missing_report, "total_missing", 0) <= 0:
+            return recs
+
+        profile_by_column = {
+            fp.column: fp for fp in feature_profiles if getattr(fp, "column", None)
+        }
+        for column_report in getattr(missing_report, "column_reports", []):
+            feature_profile = profile_by_column.get(column_report.column)
+            if feature_profile and getattr(feature_profile, "numeric_profile", None) is not None:
+                action = f"Impute {column_report.column} with median."
+            else:
+                action = f"Impute {column_report.column} with mode."
+            recs.append(
+                Recommendation(
+                    category="imputation",
+                    action=action,
+                    confidence=0.9,
+                    evidence=[Evidence(reason="Column has missing values", statistics={"missing_count": column_report.missing_count})],
+                )
+            )
+
+        column_missing_percent = max(
+            [getattr(column_report, "missing_percent", 0.0) for column_report in getattr(missing_report, "column_reports", [])],
+            default=0.0,
+        ) / 100.0
+        if column_missing_percent >= self.config.missing_threshold:
+            recs.append(
+                Recommendation(
+                    category="imputation",
+                    action="Investigate extensive missingness before imputation.",
+                    confidence=0.75,
+                    evidence=[Evidence(reason="Missingness exceeds configured threshold", statistics={"missing_percent": column_missing_percent * 100})],
+                )
+            )
+        return recs
+
+    def _outlier_recommendations(self, outlier_reports: List[Any]) -> List[Recommendation]:
+        recs: List[Recommendation] = []
+        for report in outlier_reports:
+            confidence = 0.95 if getattr(report, "outlier_percent", 0.0) >= self.config.outlier_threshold_percent else 0.65
+            action = (
+                f"Handle significant outliers in {report.column} using robust scaling or capping."
+                if confidence > 0.8
+                else f"Minor outliers detected in {report.column}; monitor or cap if needed."
+            )
+            recs.append(
+                Recommendation(
+                    category="outlier_handling",
+                    action=action,
+                    confidence=confidence,
+                    evidence=[Evidence(reason="Outlier report", statistics={"outlier_percent": getattr(report, "outlier_percent", 0.0)})],
+                )
+            )
+        return recs
+
+    def _transformation_recommendations(self, feature_profiles: List[Any]) -> List[Recommendation]:
+        recs: List[Recommendation] = []
+        for profile in feature_profiles:
+            numeric_profile = getattr(profile, "numeric_profile", None)
+            if numeric_profile is None:
+                continue
+            skewness = abs(getattr(numeric_profile, "skewness", 0.0))
+            if skewness < self.config.skewness_threshold:
+                continue
+            if getattr(numeric_profile, "min", 0.0) >= 0 and getattr(numeric_profile, "skewness", 0.0) > 0:
+                action = f"Apply log transform to {profile.column}."
+            else:
+                action = f"Apply Yeo-Johnson / PowerTransformer to {profile.column}."
+            recs.append(
+                Recommendation(
+                    category="transformation",
+                    action=action,
+                    confidence=0.9,
+                    evidence=[Evidence(reason="Skewed numeric distribution", statistics={"skewness": getattr(numeric_profile, "skewness", 0.0)})],
+                )
+            )
+        return recs
+
+    def _scaling_recommendations(self, feature_profiles: List[Any], target_profile: Any) -> Recommendation:
+        numeric_profiles = [fp for fp in feature_profiles if getattr(fp, "numeric_profile", None) is not None]
+        if not numeric_profiles:
+            return Recommendation(
+                category="scaling",
+                action="No numeric features to scale.",
+                confidence=1.0,
+            )
+        return Recommendation(
+            category="scaling",
+            action="Scale numeric features. Use StandardScaler or RobustScaler.",
+            confidence=0.9,
+            evidence=[Evidence(reason="Numeric features present", statistics={"n_numeric": len(numeric_profiles)})],
+        )
+
+    def _encoding_recommendations(self, feature_profiles: List[Any]) -> List[Recommendation]:
+        recs: List[Recommendation] = []
+        for profile in feature_profiles:
+            categorical_profile = getattr(profile, "categorical_profile", None)
+            numeric_profile = getattr(profile, "numeric_profile", None)
+            if categorical_profile is not None:
+                unique_count = getattr(categorical_profile, "unique_count", 0)
+                if unique_count <= 2:
+                    action = f"Use binary / 0/1 encoding for {profile.column}."
+                elif unique_count <= self.config.low_cardinality_threshold:
+                    action = f"Use one-hot encoding for {profile.column}."
+                else:
+                    action = f"Use frequency encoding or ordinal encoding for {profile.column}."
+                recs.append(
+                    Recommendation(category="encoding", action=action, confidence=0.9)
+                )
+            elif numeric_profile is not None and getattr(numeric_profile, "is_categorical_like", False):
+                recs.append(
+                    Recommendation(
+                        category="encoding",
+                        action=f"Treat {profile.column} as categorical and encode it explicitly.",
+                        confidence=0.85,
+                    )
+                )
+        return recs
+
+    def _correlation_recommendations(self, correlation_pairs: List[Any]) -> List[Recommendation]:
+        recs: List[Recommendation] = []
+        for pair in correlation_pairs:
+            coefficient = abs(getattr(pair, "coefficient", 0.0))
+            if coefficient < self.config.correlation_threshold:
+                continue
+            recs.append(
+                Recommendation(
+                    category="feature_selection",
+                    action=f"Drop one of {pair.feature_a} or {pair.feature_b} due to high correlation.",
+                    confidence=0.95,
+                    evidence=[Evidence(reason="High correlation pair", statistics={"coefficient": getattr(pair, "coefficient", 0.0)})],
+                )
+            )
+        return recs
+
+    def _feature_engineering_recommendations(
+        self,
+        feature_profiles: List[Any],
+        correlation_pairs: List[Any],
+    ) -> List[Recommendation]:
+        if not self.enable_feature_engineering:
+            return []
+        recs: List[Recommendation] = []
+        numeric_profiles = [fp for fp in feature_profiles if getattr(fp, "numeric_profile", None) is not None]
+        if len(numeric_profiles) >= 2:
+            first, second = numeric_profiles[:2]
+            recs.append(
+                Recommendation(
+                    category="feature_engineering",
+                    action=f"Consider a ratio feature between {first.column} and {second.column}.",
+                    confidence=0.75,
+                )
+            )
+        if any(abs(getattr(pair, "coefficient", 0.0)) >= self.config.correlation_threshold for pair in correlation_pairs):
+            recs.append(
+                Recommendation(
+                    category="feature_engineering",
+                    action="Some features look redundant; consider interaction or composite features after dropping duplicates.",
+                    confidence=0.8,
+                )
+            )
+        return recs
+
+    def _model_recommendations(
+        self,
+        target_profile: Any,
+        feature_profiles: List[Any],
+        correlation_pairs: List[Any],
+        outlier_reports: List[Any],
+        missing_report: Any,
+        metadata: Optional[Any] = None,
+    ) -> List[ModelRecommendation]:
+        if target_profile is None:
+            return [ModelRecommendation(model_name="N/A", suitability="none", reason="Target profile missing.")]
+
+        is_regression = bool(getattr(target_profile, "is_regression", False))
+        has_missing = getattr(missing_report, "total_missing", 0) > 0
+
+        models: List[ModelRecommendation] = []
+        if is_regression:
+            models.extend(
+                [
+                    ModelRecommendation(model_name="LinearRegression", suitability="baseline", reason="Simple numerical baseline."),
+                    ModelRecommendation(model_name="RidgeCV", suitability="good", reason="Regularized linear model."),
+                    ModelRecommendation(model_name="RandomForestRegressor", suitability="excellent", reason="Strong tree ensemble for tabular regression."),
+                ]
+            )
+            if has_missing:
+                models.append(ModelRecommendation(model_name="HistGradientBoostingRegressor", suitability="excellent", reason="Handles missing values natively."))
+        else:
+            models.extend(
+                [
+                    ModelRecommendation(model_name="LogisticRegression", suitability="baseline", reason="Simple classification baseline."),
+                    ModelRecommendation(model_name="RandomForestClassifier", suitability="good", reason="Strong tree ensemble for tabular classification."),
+                ]
+            )
+            if getattr(target_profile, "is_binary", False):
+                models.append(ModelRecommendation(model_name="LogisticRegressionCV", suitability="good", reason="Cross-validated logistic model for binary tasks."))
+            if has_missing:
+                models.append(ModelRecommendation(model_name="HistGradientBoostingClassifier", suitability="excellent", reason="Handles missing values natively."))
+
+        if XGBOOST_AVAILABLE:
+            models.append(ModelRecommendation(model_name="XGBRegressor" if is_regression else "XGBClassifier", suitability="good", reason="Optional XGBoost support available."))
+        if LIGHTGBM_AVAILABLE:
+            models.append(ModelRecommendation(model_name="LGBMRegressor" if is_regression else "LGBMClassifier", suitability="good", reason="Optional LightGBM support available."))
+
+        return models
+
+    def _pipeline_suggestion(
+        self,
+        feature_profiles: List[Any],
+        missing_report: Optional[Any] = None,
+        outlier_columns: Optional[List[str]] = None,
+        transformation_recs: Optional[List[Recommendation]] = None,
+    ) -> PipelineSuggestion:
+        steps: List[Tuple[str, str]] = []
+        if missing_report is not None and getattr(missing_report, "total_missing", 0) > 0:
+            steps.append(("imputation", "SimpleImputer or a native missing-value model."))
+        if outlier_columns:
+            steps.append(("scaler", "RobustScaler for outlier-resistant scaling."))
+        else:
+            numeric_profiles = [fp for fp in feature_profiles if getattr(fp, "numeric_profile", None) is not None]
+            if numeric_profiles:
+                steps.append(("scaler", "StandardScaler for numeric features."))
+        if transformation_recs:
+            steps.append(("transformation", transformation_recs[0].action))
+        categorical_profiles = [fp for fp in feature_profiles if getattr(fp, "categorical_profile", None) is not None]
+        if categorical_profiles:
+            unique_counts = [getattr(fp.categorical_profile, "unique_count", 0) for fp in categorical_profiles]
+            if any(count <= self.config.low_cardinality_threshold for count in unique_counts):
+                steps.append(("encoding", "OneHotEncoder for low-cardinality categoricals."))
+            else:
+                steps.append(("encoding", "OrdinalEncoder or frequency encoding for high-cardinality categoricals."))
+        if not steps:
+            steps.append(("passthrough", "No preprocessing required."))
+        return PipelineSuggestion(name="tabular_pipeline", steps=steps, explanation="Chosen from observed missingness, skew, outliers, and cardinality.")
+
+    def generate_recommendations(self, analysis_result: Any) -> Dict[str, Any]:
+        """Generate a complete heuristic recommendation bundle from an analysis result."""
+        if not isinstance(analysis_result, dict):
+            raise RecommendationError("analysis_result must be a dictionary.")
+
+        analysis = resolve_analysis_result(analysis_result)
+        required_keys = ["metadata", "duplicates", "infinite", "missing", "outliers", "feature_profiles", "correlation_pairs", "target_profile"]
+        for key in required_keys:
+            if key not in analysis:
+                raise RecommendationError(f"Missing required key: {key}")
+
+        feature_profiles = analysis.get("feature_profiles", [])
+        outliers = analysis.get("outliers", [])
+        correlation_pairs = analysis.get("correlation_pairs", [])
+        missing_report = analysis.get("missing")
+        target_profile = analysis.get("target_profile")
+
+        if not isinstance(feature_profiles, list):
+            raise RecommendationError("feature_profiles must be a list.")
+        if not isinstance(outliers, list):
+            raise RecommendationError("outliers must be a list.")
+        if not isinstance(correlation_pairs, list):
+            raise RecommendationError("correlation_pairs must be a list.")
+
+        imputation = self._imputation_recommendations(feature_profiles, missing_report)
+        outlier_handling = self._outlier_recommendations(outliers)
+        transformation = self._transformation_recommendations(feature_profiles)
+        scaling = self._scaling_recommendations(feature_profiles, target_profile)
+        encoding = self._encoding_recommendations(feature_profiles)
+        feature_engineering = self._feature_engineering_recommendations(feature_profiles, correlation_pairs)
+        feature_selection = self._correlation_recommendations(correlation_pairs)
+        models = self._model_recommendations(
+            target_profile=target_profile,
+            feature_profiles=feature_profiles,
+            correlation_pairs=correlation_pairs,
+            outlier_reports=outliers,
+            missing_report=missing_report,
+            metadata=analysis.get("metadata"),
+        )
+        pipeline = self._pipeline_suggestion(
+            feature_profiles,
+            missing_report=missing_report,
+            outlier_columns=[report.column for report in outliers if getattr(report, "outlier_percent", 0.0) >= self.config.outlier_threshold_percent],
+            transformation_recs=transformation,
+        )
+
+        data_quality_notes: List[str] = []
+        duplicates = analysis.get("duplicates")
+        total_duplicates = getattr(duplicates, "total_duplicates", 0) if duplicates is not None else 0
+        total_missing = getattr(missing_report, "total_missing", 0) if missing_report is not None else 0
+        if total_duplicates > 0:
+            data_quality_notes.append(f"Found {total_duplicates} duplicate rows.")
+        if total_missing > 0:
+            data_quality_notes.append(f"Missing values detected: {total_missing}.")
+        if outliers:
+            data_quality_notes.append(f"Outliers detected in {len(outliers)} columns.")
+
+        return {
+            "imputation": imputation,
+            "outlier_handling": outlier_handling,
+            "transformation": transformation,
+            "scaling": scaling,
+            "encoding": encoding,
+            "feature_engineering": feature_engineering,
+            "feature_selection": feature_selection,
+            "pipeline": pipeline,
+            "models": models,
+            "data_quality_notes": data_quality_notes,
+        }
+
+    # -----------------------------------------------------------------------
+    # Main fit method
+    # -----------------------------------------------------------------------
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        time_budget_seconds: float = 120.0,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Orchestrate the full AutoML recommendation with empirical validation.
+
+        Steps:
+        1. Meta-feature extraction
+        2. Knowledge base query (if enabled)
+        3. Candidate generation
+        4. ESCV screening → deep evaluation
+        5. LCCV on top candidates
+        6. Successive Halving hyperparameter optimisation
+        7. Bayesian optimisation fine-tuning (if skopt available)
+        8. Final pipeline assembly & fit
+        9. Store results in knowledge base
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Feature matrix.
+        y : pd.Series
+            Target vector.
+        time_budget_seconds : float, default=120
+            Total time budget for the entire process.
+        progress_callback : callable, optional
+            If provided, called after each major step with a status dict, e.g.
+            ``{"step": "meta_features_extracted", "meta": {...}}``.
+
+        Returns
+        -------
+        dict
+            Contains ``best_model``, ``cv_score``, ``cv_std``, ``pipeline``,
+            ``hyperparams``, ``training_time``, ``total_time``, and optionally
+            ``reasoning``.
+
+        Raises
+        ------
+        ValidationTimeoutError
+            If the time budget is exceeded.
+        RecommendationError
+            If an unrecoverable error occurs.
+        """
+        global_start = time.time()
+        self._notify_progress(progress_callback, "start", time_budget=time_budget_seconds)
+
+        # 0. Detect task
+        if pd.api.types.is_numeric_dtype(y) and y.nunique() > 20:
+            self._is_regression = True
+            self._scoring = "neg_mean_squared_error"
+        else:
+            self._is_regression = False
+            self._scoring = "roc_auc_ovr" if y.nunique() > 2 else "accuracy"
+
+        # 1. Meta-features
+        self.extract_meta_features(X, y)
+        self._notify_progress(progress_callback, "meta_features_extracted", meta=self._meta_features)
+
+        # 2. Knowledge base (optional)
+        similar_datasets = []
+        if self.enable_meta_learning and self.kb is not None:
+            similar_datasets = self.kb.query_similar_datasets(
+                self._meta_features, top_k=5
+            )
+            self._notify_progress(progress_callback, "knowledge_base_queried", similar_count=len(similar_datasets))
+
+        # 3. Generate candidates
+        self._candidates = self._generate_candidates()
+        self._notify_progress(progress_callback, "candidates_generated", n_candidates=len(self._candidates))
+
+        # 4. Allocate time budget adaptively
+        n_samples = self._meta_features["n_samples"]
+        if n_samples < 5000:
+            # Small dataset → more time for SH/BO
+            screening_budget = time_budget_seconds * 0.2
+            deep_budget = time_budget_seconds * 0.2
+            hyper_budget = time_budget_seconds * 0.5
+        else:
+            screening_budget = time_budget_seconds * 0.3
+            deep_budget = time_budget_seconds * 0.3
+            hyper_budget = time_budget_seconds * 0.3
+
+        # 4a. ESCV
+        escv_results = self._fast_cv_selector(
+            X, y, self._candidates, time_budget=screening_budget + deep_budget
+        )
+        if not escv_results:
+            raise RecommendationError("No model survived ESCV – check your data.")
+        self._notify_progress(progress_callback, "escv_completed", top_model=escv_results[0].model.name)
+
+        # 5. LCCV on top-2 candidates
+        top_candidates = [r.model for r in escv_results[:2]]
+        lccv_results = []
+        for cand in top_candidates:
+            self._check_timeout(global_start, time_budget_seconds * 0.9)
+            lccv = self._lccv_evaluate(X, y, cand)
+            lccv_results.append(lccv)
+        if not lccv_results:
+            # fallback to top ESCV
+            best_candidate = escv_results[0].model
+            best_extrapolated = escv_results[0].cv_score
+        else:
+            lccv_results.sort(
+                key=lambda r: r.extrapolated_score or float("-inf"), reverse=True
+            )
+            best_candidate = lccv_results[0].model
+            best_extrapolated = lccv_results[0].extrapolated_score or 0.0
+        self._notify_progress(progress_callback, "lccv_completed", best_lccv_model=best_candidate.name, extrapolated_score=best_extrapolated)
+
+        # 6. Successive Halving
+        sh_params = self._successive_halving_optimize(
+            X, y, best_candidate, time_budget=hyper_budget * 0.5
+        )
+        self._notify_progress(progress_callback, "successive_halving_done", params=sh_params)
+
+        # 7. Bayesian Optimisation fine-tuning (if time)
+        self._check_timeout(global_start, time_budget_seconds * 0.95)
+        final_params = self._bayesian_optimization_finetune(
+            X, y, best_candidate, sh_params, time_budget=hyper_budget * 0.5
+        )
+        self._notify_progress(progress_callback, "bayesian_opt_done", params=final_params)
+
+        # 8. Build final pipeline with best hyperparams
+        best_candidate.hyperparams = {**best_candidate.hyperparams, **final_params}
+        final_pipeline = self._build_pipeline(best_candidate)
+        # Fit on full data for final return
+        fit_start = time.time()
+        final_pipeline.fit(X, y)
+        train_time = time.time() - fit_start
+
+        # 9. Cross-validate for final score estimate
+        cv = (
+            StratifiedKFold(3, shuffle=True, random_state=self.random_state)
+            if not self._is_regression
+            else KFold(3, shuffle=True, random_state=self.random_state)
+        )
+        try:
+            final_scores = cross_val_score(
+                final_pipeline,
+                X,
+                y,
+                cv=cv,
+                scoring=self._scoring,
+                n_jobs=self._parallel_jobs(len(X), X.shape[1]),
+            )
+            final_cv_score = float(np.mean(final_scores))
+            final_cv_std = float(np.std(final_scores))
+        except Exception:
+            final_cv_score = best_extrapolated
+            final_cv_std = 0.0
+
+        # Store result
+        self._best_result = EvaluationResult(
+            model=best_candidate,
+            cv_score=final_cv_score,
+            cv_std=final_cv_std,
+            training_time=train_time,
+            n_folds_completed=3,
+            hyperparams_tuned=final_params,
+        )
+        self._pipeline = final_pipeline
+        self._fitted = True
+
+        # 10. Knowledge base storage
+        if self.kb is not None:
+            ds_hash = hashlib.md5(pd.util.hash_pandas_object(X, index=True).to_numpy().tobytes()).hexdigest()
+            try:
+                self.kb.store_meta_features(ds_hash, self._meta_features)
+                self.kb.store_model_performance(
+                    ds_hash,
+                    best_candidate.name,
+                    "excellent",
+                    final_cv_score,
+                    final_params,
+                )
+            except Exception as e:
+                logger.warning("Failed to store in knowledge base: %s", e)
+
+        total_time = time.time() - global_start
+        result = {
+            "best_model": best_candidate.name,
+            "cv_score": final_cv_score,
+            "cv_std": final_cv_std,
+            "pipeline": final_pipeline,
+            "hyperparams": final_params,
+            "training_time": train_time,
+            "total_time": total_time,
+            "reasoning": (
+                f"Selected via ESCV + LCCV + Successive Halving + Bayesian Opt. "
+                f"Task: {'regression' if self._is_regression else 'classification'}, "
+                f"samples: {n_samples}."
+            ),
+        }
+        self._notify_progress(progress_callback, "finished", result_summary=result)
+        return result
+
+    # -----------------------------------------------------------------------
+    # Post-fit / heuristic recommendation
+    # -----------------------------------------------------------------------
+    def get_recommendation(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
+        """Return a recommendation. If `fit` was called, returns the empirically
+        validated result; otherwise returns a heuristic recommendation.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+        y : pd.Series
+
+        Returns
+        -------
+        dict with keys ``model``, ``reasoning``, ``cv_score``, etc.
+        """
+        if self._fitted and self._best_result is not None:
+            return {
+                "model": self._best_result.model.name,
+                "reasoning": "Empirically validated as best on this data via ESCV, LCCV, and multi-fidelity optimization.",
+                "cv_score": self._best_result.cv_score,
+                "cv_std": self._best_result.cv_std,
+                "pipeline": self._pipeline,
+                "hyperparams": self._best_result.hyperparams_tuned,
+            }
+        # Heuristic fallback
+        self.extract_meta_features(X, y)
+        self._is_regression = (
+            pd.api.types.is_numeric_dtype(y) and y.nunique() > 20
+        )
+        candidates = self._generate_candidates()
+        # Pick the highest-priority candidate
+        best = candidates[0]
+        return {
+            "model": best.name,
+            "reasoning": "Heuristic recommendation (HistGradientBoosting is a top performer for tabular data). Run fit() for empirical validation.",
+            "cv_score": None,
+            "cv_std": None,
+            "pipeline": None,
+            "hyperparams": best.hyperparams,
+            "warning": "No fit() performed; results are based on heuristics only.",
+        }
+
+    # -----------------------------------------------------------------------
+    # Summarise
+    # -----------------------------------------------------------------------
+    @staticmethod
+    def summarize(recommendations: Dict[str, Any]) -> str:
+        """Return a human-readable summary."""
+        lines = ["=" * 60, " RECOMMENDATION ENGINE SUMMARY", "=" * 60]
+        if "best_model" in recommendations:
+            lines.append(f" Best model: {recommendations['best_model']}")
+            lines.append(
+                f" CV Score: {recommendations.get('cv_score', 0):.4f} "
+                f"+/- {recommendations.get('cv_std', 0):.4f}"
+            )
+            lines.append(
+                f" Training time: {recommendations.get('training_time', 0):.2f} sec"
+            )
+            lines.append(
+                f" Total time: {recommendations.get('total_time', 0):.2f} sec"
+            )
+        elif any(
+            key in recommendations
+            for key in [
+                "imputation",
+                "outlier_handling",
+                "transformation",
+                "scaling",
+                "encoding",
+                "feature_engineering",
+                "feature_selection",
+                "models",
+            ]
+        ):
+            from preml.recommendation_utils import normalize_recommendation_items
+
+            lines.append(" DATA QUALITY NOTES")
+            for note in recommendations.get("data_quality_notes", []):
+                lines.append(f" - {note}")
+            lines.append(" RECOMMENDATIONS")
+            for category in [
+                "imputation",
+                "outlier_handling",
+                "transformation",
+                "scaling",
+                "encoding",
+                "feature_engineering",
+                "feature_selection",
+            ]:
+                for rec in normalize_recommendation_items(recommendations.get(category)):
+                    lines.append(f" - {rec.action}")
+            lines.append(" MODEL RECOMMENDATIONS")
+            for model in recommendations.get("models", []):
+                lines.append(f" - {model.model_name} [{model.suitability}]")
+            pipeline = recommendations.get("pipeline")
+            if pipeline is not None:
+                lines.append(" SUGGESTED PIPELINE")
+                for step_name, description in getattr(pipeline, "steps", []):
+                    lines.append(f" - {step_name}: {description}")
+        else:
+            lines.append(" No empirical results. Use fit() to obtain validated recommendations.")
+        lines.append("=" * 60)
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Example usage (if run as script)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import numpy as np
+
+    np.random.seed(42)
+    X = pd.DataFrame(
+        {
+            "num1": np.random.randn(2000),
+            "num2": np.random.randn(2000) * 2 + 1,
+            "cat": np.random.choice(["A", "B", "C"], 2000),
+            "num3": np.random.exponential(2, 2000),
+        }
+    )
+    y_reg = X["num1"] * 0.5 + X["num2"] * 0.3 + np.random.randn(2000) * 0.2
+    y_cls = ((X["num1"] + X["num2"] > 0)).astype(int)
+
+    engine = RecommendationEngine(random_state=42)
+
+    print("=== Regression example ===")
+    result = engine.fit(X, y_reg, time_budget_seconds=60)
+    print(engine.summarize(result))
+    print("\nPreprocessing recommendations:", engine.get_preprocessing_recommendations())
+
+    print("\n=== Classification heuristic ===")
+    engine2 = RecommendationEngine()
+    rec = engine2.get_recommendation(X, y_cls)
+    print(f"Recommended: {rec['model']}, reason: {rec['reasoning']}")

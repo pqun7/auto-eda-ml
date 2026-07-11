@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.1.6] - 2026-07-11
+
+### Changed
+
+- Synchronized Usage Guide examples with the empirical `RecommendationEngine.fit()` workflow.
+- Expanded recommendation-engine documentation to show both descriptive and empirical usage paths.
+- Bumped package version metadata for the new documentation release.
+
 ## [0.1.5] - 2026-07-11
 
 ### Added

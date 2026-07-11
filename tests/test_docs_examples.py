@@ -12,8 +12,10 @@ import pandas as pd
 from preml import quick_eda
 from preml.eda import EDAAnalyzer
 from preml.preprocessing import PreprocessingBuilder
+from preml.recommendation_engine import EvaluationResult, ModelCandidate, RecommendationEngine
 from preml.report import ReportGenerator
 from preml.model_utils import BaselineTrainer
+from sklearn.ensemble import HistGradientBoostingRegressor
 
 
 def _make_dataframe(n: int = 80) -> pd.DataFrame:
@@ -84,3 +86,64 @@ def test_usage_guide_report_generation_executes(tmp_path):
     assert (tmp_path / "eda_report.html").exists()
     assert (tmp_path / "eda_report.md").exists()
     assert (tmp_path / "eda_report.txt").exists()
+
+
+def test_usage_guide_recommendation_engine_examples_execute(monkeypatch):
+    df = pd.DataFrame(
+        {
+            "feature1": np.linspace(0.0, 1.0, 24),
+            "feature2": np.linspace(1.0, 2.0, 24),
+            "category": np.array(["A", "B", "C"] * 8),
+        }
+    )
+    y = df["feature1"] * 0.5 + df["feature2"] * 0.2 + np.random.default_rng(42).normal(0, 0.01, len(df))
+
+    engine = RecommendationEngine(random_state=42)
+    candidate = ModelCandidate(
+        name="HistGradientBoostingRegressor",
+        estimator_class=HistGradientBoostingRegressor,
+        priority=1.0,
+        hyperparams={"random_state": 42},
+        supports_categorical=True,
+        supports_missing=True,
+        needs_scaling=False,
+    )
+
+    monkeypatch.setattr(engine, "_generate_candidates", lambda: [candidate])
+    monkeypatch.setattr(
+        engine,
+        "_fast_cv_selector",
+        lambda X, y, candidates, time_budget: [
+            EvaluationResult(
+                model=candidate,
+                cv_score=0.91,
+                cv_std=0.02,
+                training_time=0.0,
+                n_folds_completed=5,
+                extrapolated_score=0.92,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        engine,
+        "_lccv_evaluate",
+        lambda X, y, cand: EvaluationResult(
+            model=cand,
+            cv_score=0.93,
+            cv_std=0.0,
+            training_time=0.0,
+            n_folds_completed=3,
+            extrapolated_score=0.93,
+        ),
+    )
+    monkeypatch.setattr(engine, "_successive_halving_optimize", lambda *args, **kwargs: {})
+    monkeypatch.setattr(engine, "_bayesian_optimization_finetune", lambda *args, **kwargs: {})
+
+    result = engine.fit(df, y, time_budget_seconds=5.0)
+    summary = engine.summarize(result)
+    recommendation = engine.get_recommendation(df, y)
+
+    assert "Best model" in summary
+    assert recommendation["model"] == "HistGradientBoostingRegressor"
+    assert recommendation["pipeline"] is not None
+    assert recommendation["cv_score"] is not None

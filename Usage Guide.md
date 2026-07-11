@@ -98,11 +98,13 @@ Use this decision tree:
     - Use `EDAAnalyzer(df, target=...).run()`
 3. I only need statistical facts:
     - Use `StatisticsEngine(df, target=...).run_full_analysis()`
-4. I need recommendations from existing stats:
+4. I need empirical model selection from raw tabular features:
+    - Use `RecommendationEngine(...).fit(X, y)`
+5. I need recommendations from existing stats:
     - Use `RecommendationEngine().generate_recommendations(stats)`
-5. I need sklearn preprocessing from analysis:
+6. I need sklearn preprocessing from analysis:
     - Use `PreprocessingBuilder(analysis)`
-6. I need baseline model evaluation:
+7. I need baseline model evaluation:
     - Use `BaselineTrainer` with preprocessing pipeline.
 
 ## Quick Start
@@ -218,14 +220,20 @@ Behavior note:
 
 ### `preml.recommendation_engine`
 
-#### `RecommendationEngine(config=None, enable_feature_engineering=True)`
+#### `RecommendationEngine(config=None, knowledge_db_path="knowledge.db", random_state=None, enable_meta_learning=True, enable_feature_engineering=None)`
 
+- `fit(X, y, time_budget_seconds=120.0, progress_callback=None)`
+- `get_recommendation(X, y)`
 - `generate_recommendations(analysis_results)`
 - `summarize(recommendations)`
 
 Expected analysis input keys include:
 
 - `duplicates`, `infinite`, `missing`, `outliers`, `feature_profiles`, `correlation_pairs`, `target_profile`
+
+For empirical selection, pass the raw feature matrix and target vector to `fit()`.
+For descriptive recommendations, pass the analysis dictionary returned by
+`EDAAnalyzer.run()` or `quick_eda()` to `generate_recommendations()`.
 
 ### `preml.preprocessing`
 
@@ -355,7 +363,47 @@ stats = StatisticsEngine(df, target="target").run_full_analysis()
 recs = RecommendationEngine().generate_recommendations(stats)
 ```
 
-### 3) Preprocess train/test split
+Use this path when you already have an analysis dictionary and want human-readable
+recommendations for imputation, encoding, scaling, feature selection, and model
+ranking without re-running the statistical analysis.
+
+### 3) Empirical model selection from raw features
+
+```python
+import numpy as np
+import pandas as pd
+
+from preml.recommendation_engine import RecommendationEngine
+
+df = pd.DataFrame(
+    {
+        "feature1": np.random.randn(1000),
+        "feature2": np.random.randn(1000),
+        "category": np.random.choice(["A", "B", "C"], 1000),
+    }
+)
+y = df["feature1"] * 0.5 + df["feature2"] * 0.3 + np.random.randn(1000) * 0.1
+
+engine = RecommendationEngine(random_state=42)
+result = engine.fit(df, y, time_budget_seconds=60)
+
+print(engine.summarize(result))
+
+post_fit = engine.get_recommendation(df, y)
+print(post_fit["model"])
+print(post_fit["cv_score"])
+print(post_fit["pipeline"])
+```
+
+This path is the right choice when you want the engine to actually evaluate
+models on your data and return the best validated pipeline. `fit()` performs the
+full empirical workflow, while `get_recommendation()` reuses the fitted result.
+
+You can also use `get_recommendation(df, y)` before calling `fit()` if you only
+want a fast heuristic suggestion, but the returned `cv_score` and `pipeline`
+will be `None` in that mode.
+
+### 4) Preprocess train/test split
 
 ```python
 from sklearn.model_selection import train_test_split
@@ -374,7 +422,7 @@ X_train_t = builder.transform(X_train)
 X_test_t = builder.transform(X_test)
 ```
 
-### 4) Report generation
+### 5) Report generation
 
 ```python
 from preml import quick_eda
@@ -1127,23 +1175,41 @@ Evidence-Based Recommendations
 ## Basic Example
 
 ```python
-# Import the recommendation engine
+import numpy as np
+import pandas as pd
+
+from preml.statistics_engine import StatisticsEngine
 from preml.recommendation_engine import RecommendationEngine
 
-# Create the recommendation engine
-engine = RecommendationEngine(
-
-    # Optional shared configuration
-    config=config,
+df = pd.DataFrame(
+    {
+        "feature1": np.random.randn(1000),
+        "feature2": np.random.randn(1000),
+        "category": np.random.choice(["A", "B", "C"], 1000),
+        "target": np.random.randn(1000),
+    }
 )
 
-# Generate recommendations from a completed analysis
-recommendations = engine.generate_recommendations(
-    analysis,
-)
+# 1) Descriptive recommendations from a completed analysis
+stats_engine = StatisticsEngine(df, target="target")
+analysis = stats_engine.run_full_analysis()
+engine = RecommendationEngine()
+recommendations = engine.generate_recommendations(analysis)
+
+# 2) Empirical model selection from raw tabular data
+X = df.drop(columns=["target"])
+y = df["feature1"] * 0.5 + df["feature2"] * 0.3 + np.random.randn(1000) * 0.1
+
+fit_result = engine.fit(X, y, time_budget_seconds=60)
+print(engine.summarize(fit_result))
+
+post_fit = engine.get_recommendation(X, y)
+print(post_fit["model"])
 ```
 
-The returned recommendations can be consumed by preprocessing components, reports, notebooks, or custom applications.
+The first path is for already-computed analysis dictionaries. The second path is
+for the new empirical workflow, where the engine evaluates models directly on
+the data and then exposes the validated result through `get_recommendation()`.
 
 ---
 
@@ -3396,30 +3462,23 @@ builder = PreprocessingBuilder(
 pipeline = builder.build_pipeline()
 
 # ----------------------------------------------------
-# Step 4 — Prepare the feature matrix
+# Step 4 — Separate features from the target
 # ----------------------------------------------------
 
-# Collect feature names
-feature_columns = [
-
-    profile.column
-
-    for profile in analysis["feature_profiles"]
-]
-
-# Transform the features
-X = builder.fit_transform(
-    df[feature_columns]
-)
+X = df.drop(columns=[target])
 
 # ----------------------------------------------------
-# Step 5 — Generate feature engineering suggestions
+# Step 5 — Fit and transform the feature matrix
+# ----------------------------------------------------
+
+X_transformed = builder.fit_transform(X)
+
+# ----------------------------------------------------
+# Step 6 — Generate feature engineering suggestions
 # ----------------------------------------------------
 
 feature_engineering = FeatureEngineering(
-
     analysis,
-
     df=df,
 )
 
@@ -3427,50 +3486,38 @@ suggestions = feature_engineering.suggest_features()
 
 # Display generated suggestions
 for suggestion in suggestions:
-
     print(suggestion.action)
 
 # ----------------------------------------------------
-# Step 6 — Train baseline models
+# Step 7 — Train baseline models
 # ----------------------------------------------------
 
 trainer = BaselineTrainer()
-
 results = trainer.train_baselines(
-
-    analysis,
-
+    analysis_result=analysis,
     df=df,
-
     target_col=target,
-
     preprocessing_pipeline=pipeline,
-
     cv=5,
 )
 
-# Display evaluation results
 for result in results:
-
     print(result["model_name"])
     print(result["mean_scores"])
 
 # ----------------------------------------------------
-# Step 7 — Generate a report
+# Step 8 — Generate a report
 # ----------------------------------------------------
 
 ReportGenerator(
-
     analysis,
-
     df=df,
-
 ).save_report(
-
-    "report.html",
-
+    "report",
     format="html",
 )
+
+print(X_transformed.shape)
 ```
 
 ---

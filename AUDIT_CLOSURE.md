@@ -2,11 +2,11 @@
 
 Date: 2026-07-11
 Repository: pqun7/preml
-Release: 0.1.5
+Release: 0.1.6
 
 ## Closure Summary
 
-This document records closure evidence for the professional audit recommendations implemented and verified in the 0.1.5 release line.
+This document records closure evidence for the professional audit recommendations implemented and verified in the 0.1.6 release line.
 
 ## Implemented and Verified Areas
 
@@ -52,8 +52,8 @@ This document records closure evidence for the professional audit recommendation
 ## Verification Evidence
 
 - Test suite: `109 passed`
-- Packaging: `python -m build` succeeded for `pypreml-0.1.5` (sdist + wheel)
+- Packaging: `python -m build` succeeded for `pypreml-0.1.6` (sdist + wheel)
 
 ## Final Statement
 
-The repository meets the release-readiness closure criteria for the implemented audit scope in version 0.1.5.
+The repository meets the release-readiness closure criteria for the implemented audit scope in version 0.1.6.
