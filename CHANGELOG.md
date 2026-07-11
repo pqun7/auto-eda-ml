@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.1.5] - 2026-07-11
+
+### Added
+
+- Added release audit closure document (`AUDIT_CLOSURE.md`) for issue-to-evidence traceability.
+- Added executable documentation workflow tests to prevent docs/API drift.
+- Added issue and pull request templates for contribution quality.
+
+### Changed
+
+- Finalized release documentation for API-stable workflows in README and Usage Guide.
+- Standardized packaging license metadata to modern `pyproject.toml` format.
+- Improved release hygiene by tightening generated artifact ignore rules.
+
+### Fixed
+
+- Removed packaging deprecation warnings related to license metadata format.
+- Eliminated visualization test warning source in outlier summary layout.
+
 ## [0.1.4] - 2026-07-11
 
 ### Added
