@@ -69,3 +69,9 @@ env/
 *~
 
 upd.txt
+
+# Local build metadata (generated)
+preml.egg-info/
+pypreml.egg-info/
+dist/
+build/

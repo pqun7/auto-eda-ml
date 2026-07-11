@@ -49,21 +49,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _REGRESSION_METRICS: Dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
-    "rmse": lambda yt, yp: np.sqrt(mean_squared_error(yt, yp)),
-    "mae": mean_absolute_error,
-    "r2": r2_score,
+    "rmse": lambda yt, yp: float(np.sqrt(mean_squared_error(yt, yp))),
+    "mae": lambda yt, yp: float(mean_absolute_error(yt, yp)),
+    "r2": lambda yt, yp: float(r2_score(yt, yp)),
 }
 
 _CLASSIFICATION_METRICS: Dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
-    "accuracy": accuracy_score,
-    "precision": lambda yt, yp: precision_score(
-        yt, yp, average="weighted", zero_division=0
+    "accuracy": lambda yt, yp: float(accuracy_score(yt, yp)),
+    "precision": lambda yt, yp: float(
+        precision_score(yt, yp, average="weighted", zero_division=0)
     ),
-    "recall": lambda yt, yp: recall_score(
-        yt, yp, average="weighted", zero_division=0
+    "recall": lambda yt, yp: float(
+        recall_score(yt, yp, average="weighted", zero_division=0)
     ),
-    "f1": lambda yt, yp: f1_score(
-        yt, yp, average="weighted", zero_division=0
+    "f1": lambda yt, yp: float(
+        f1_score(yt, yp, average="weighted", zero_division=0)
     ),
 }
 
