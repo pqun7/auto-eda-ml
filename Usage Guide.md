@@ -1,262 +1,475 @@
-# PreML
+# PreML Usage Guide
 
-> **PreML** is a production-ready Python library for automating the most repetitive stages of tabular machine learning workflows. It performs exploratory data analysis (EDA), statistical profiling, preprocessing pipeline generation, feature engineering recommendations, baseline model evaluation, visualization, and professional report generation—all while remaining transparent, configurable, and fully compatible with the Scikit-learn ecosystem.
+PreML is an evidence-driven library for tabular ML workflows. It separates:
 
-Unlike many automated machine learning tools, **PreML** does not rely on opaque heuristics. Every recommendation is derived from statistical evidence, enabling reproducible, explainable, and trustworthy machine learning workflows.
+1. Statistical fact extraction
+2. Recommendation generation from evidence
+3. Preprocessing pipeline construction
+4. Feature engineering suggestions
+5. Baseline model training and report generation
 
----
+This guide is the authoritative reference for the current implementation.
 
-# Table of Contents
+## Contents
 
-- [Introduction](#introduction)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Core Components](#core-components)
-- [End-to-End Workflow](#end-to-end-workflow)
-- [Performance](#performance)
-- [Thread Safety](#thread-safety)
-- [Reproducibility](#reproducibility)
-- [Best Practices](#best-practices)
-- [Common Pitfalls](#common-pitfalls)
-- [FAQ](#faq)
-- [Architecture](#architecture)
-- [API Reference](#api-reference)
-- [License](#license)
-- [Citation](#citation)
+- Philosophy and Design Goals
+- Installation and Compatibility
+- Architecture and Data Flow
+- Which Component Should I Use?
+- Quick Start
+- Core Workflow (End-to-End)
+- API Reference
+- Configuration Reference
+- Error Handling and Troubleshooting
+- FAQ
+- Best Practices
+- Performance and Scalability Guidance
+- Pipeline Persistence
+- sklearn Integration Notes
+- Migration Notes
 
----
+## Philosophy and Design Goals
 
-# Introduction
+PreML is designed to be transparent, not black-box automation.
 
-Machine learning projects often spend significantly more time on data preparation than on model development. PreML streamlines this process by automating statistical analysis and generating evidence-based preprocessing recommendations while keeping every decision transparent and interpretable.
+- Every recommendation includes evidence.
+- Statistical computation is separate from decision logic.
+- Preprocessing is sklearn-compatible.
+- Modules are composable: use only what you need.
 
-The library integrates multiple stages of a traditional machine learning workflow into a unified API:
+## Installation and Compatibility
 
-- Exploratory Data Analysis (EDA)
-- Statistical profiling
-- Data quality assessment
-- Preprocessing pipeline generation
-- Feature engineering recommendations
-- Baseline model training
-- Visualization
-- Professional report generation
+### Requirements
 
-Every recommendation is produced from measurable statistical evidence rather than hard-coded assumptions, making workflows reproducible and suitable for both research and production environments.
+- Python: 3.9+
+- pandas: >=1.5.0,<3.0.0
+- numpy: >=1.23.0,<3.0.0
+- scipy: >=1.9.0,<2.0.0
+- matplotlib: >=3.7.0,<4.0.0
+- seaborn: >=0.12.0,<1.0.0
+- scikit-learn: >=1.2.0,<2.0.0
 
----
-
-# Requirements
-
-PreML supports modern Python versions and is built on widely adopted scientific computing libraries.
-
-| Requirement | Version |
-|------------|---------|
-| Python | 3.10+ |
-| pandas | Latest Stable |
-| NumPy | Latest Stable |
-| scikit-learn | Latest Stable |
-| matplotlib | Latest Stable |
-| seaborn | Latest Stable |
-| SciPy | Latest Stable |
-
----
-
-# Installation
-
-## Install from PyPI
-
-Install the latest stable release directly from PyPI.
+### Install from PyPI
 
 ```bash
-# Install the latest stable version of PreML
-pip install preml
+pip install pypreml
 ```
 
----
-
-## Install from Source
-
-Clone the repository and install it in editable mode if you plan to contribute or modify the library.
+### Install from source
 
 ```bash
-# Clone the GitHub repository
-git clone https://github.com/alinazer30/preml.git
-
-# Navigate into the project directory
+git clone https://github.com/pqun7/preml.git
 cd preml
-
-# Install the package in editable mode
-pip install -e .
+python -m pip install -e .
 ```
 
-> **Note**
->
-> Installing in editable mode (`-e`) allows any source code modifications to become immediately available without reinstalling the package.
+## Architecture and Data Flow
 
----
+```mermaid
+flowchart TD
+     A[pandas DataFrame] --> B[StatisticsEngine]
+     B --> C[RecommendationEngine]
+     B --> D[EDAAnalyzer]
+     C --> D
+     D --> E[PreprocessingBuilder]
+     D --> F[FeatureEngineering]
+     D --> G[BaselineTrainer]
+     D --> H[ReportGenerator]
+```
 
-# Quick Start
+### Module Responsibilities
 
-The following example demonstrates a minimal end-to-end workflow using PreML.
+- `preml.statistics_engine.StatisticsEngine`: computes facts only.
+- `preml.recommendation_engine.RecommendationEngine`: converts facts to recommendations.
+- `preml.eda.EDAAnalyzer`: orchestrates analysis and quality scoring.
+- `preml.preprocessing.PreprocessingBuilder`: builds and applies sklearn preprocessing.
+- `preml.feature_engineering.FeatureEngineering`: suggests engineered features.
+- `preml.model_utils.BaselineTrainer`: evaluates baseline models.
+- `preml.report.ReportGenerator`: emits text/markdown/html reports.
+- `preml.visualization`: plotting utilities and explanation helpers.
+
+## Which Component Should I Use?
+
+Use this decision tree:
+
+1. I just need a one-call analysis result:
+    - Use `quick_eda(df, target=...)`
+2. I need orchestration + summary method:
+    - Use `EDAAnalyzer(df, target=...).run()`
+3. I only need statistical facts:
+    - Use `StatisticsEngine(df, target=...).run_full_analysis()`
+4. I need recommendations from existing stats:
+    - Use `RecommendationEngine().generate_recommendations(stats)`
+5. I need sklearn preprocessing from analysis:
+    - Use `PreprocessingBuilder(analysis)`
+6. I need baseline model evaluation:
+    - Use `BaselineTrainer` with preprocessing pipeline.
+
+## Quick Start
 
 ```python
 import pandas as pd
 
-# Import the high-level EDA helper
 from preml import quick_eda
-
-# Import the preprocessing pipeline builder
 from preml.preprocessing import PreprocessingBuilder
 
-# Load your dataset
+# 1) Load data
 df = pd.read_csv("housing.csv")
+target = "SalePrice"
 
-# Run exploratory data analysis
-# This returns a dictionary containing statistics,
-# recommendations, feature profiles, and metadata.
-analysis = quick_eda(
-    df,
-    target="SalePrice",
-)
+# 2) Analyze
+analysis = quick_eda(df, target=target)
 
-# Build a preprocessing pipeline based on
-# the statistical analysis results.
+# 3) Build preprocessing
 builder = PreprocessingBuilder(analysis)
+X_train = df.drop(columns=[target])
+X_transformed = builder.fit_transform(X_train)
 
-pipeline = builder.build_pipeline()
+# 4) Transform future data with same fitted builder
+X_new = builder.transform(X_train.head(5))
 
-# Collect feature columns while excluding the target.
-feature_columns = [
-    profile.column
-    for profile in analysis["feature_profiles"]
-]
-
-# Fit the preprocessing pipeline and transform
-# the dataset into a machine-learning-ready feature matrix.
-X_transformed = builder.fit_transform(
-    df[feature_columns]
-)
+print(X_transformed.shape)
 ```
 
-After these steps:
-
-- The dataset has been analyzed.
-- Statistical recommendations have been generated.
-- A production-ready preprocessing pipeline has been created.
-- The feature matrix has been transformed into a NumPy array compatible with Scikit-learn estimators.
-
-> **Tip**
->
-> For a complete workflow including feature engineering, baseline model evaluation, visualization, and report generation, continue to the **End-to-End Workflow** section.
-
----
-
-# Configuration
-
-All configurable thresholds and runtime behavior are managed through the `MLToolkitConfig` class.
-
-Whenever a configuration parameter is omitted, PreML automatically falls back to safe and well-tested default values. This allows beginners to get started immediately while giving advanced users complete control over the analysis pipeline.
-
----
-
-## Creating a Custom Configuration
+## Core Workflow (End-to-End)
 
 ```python
-# Import the configuration class
+import pandas as pd
+
+from preml.eda import EDAAnalyzer
+from preml.preprocessing import PreprocessingBuilder
+from preml.model_utils import BaselineTrainer
+
+# Data
+_df = pd.read_csv("housing.csv")
+_target = "SalePrice"
+
+# Analyze
+analyzer = EDAAnalyzer(_df, target=_target)
+analysis = analyzer.run()
+print(analyzer.summary())
+
+# Preprocess
+builder = PreprocessingBuilder(analysis)
+preprocessor = builder.build_pipeline()
+
+# Baseline models
+trainer = BaselineTrainer()
+results = trainer.train_baselines(
+     analysis_result=analysis,
+     df=_df,
+     target_col=_target,
+     preprocessing_pipeline=preprocessor,
+     cv=5,
+)
+
+for row in results:
+     print(row["model_name"], row["mean_scores"])
+```
+
+## API Reference
+
+### `preml.eda`
+
+#### `EDAAnalyzer(df, target=None, config=None, enable_feature_engineering=True)`
+
+Main orchestrator.
+
+- `run() -> dict`: executes full analysis.
+- `summary() -> str`: text summary.
+
+Return keys from `run()`:
+
+- `metadata`
+- `duplicates`
+- `infinite`
+- `missing`
+- `outliers`
+- `feature_profiles`
+- `correlation_pairs`
+- `target_profile`
+- `recommendations`
+- `data_quality_score`
+- `data_quality_notes`
+
+#### `quick_eda(df, target=None) -> dict`
+
+Convenience wrapper around `EDAAnalyzer(...).run()`.
+
+### `preml.statistics_engine`
+
+#### `StatisticsEngine(df, target=None, config=None)`
+
+Key methods:
+
+- `compute_dataset_metadata()`
+- `compute_duplicate_report()`
+- `compute_infinite_report()`
+- `compute_missing_report()`
+- `compute_outlier_report()`
+- `compute_feature_profiles()`
+- `compute_correlation_pairs()`
+- `compute_target_profile()`
+- `run_full_analysis()`
+
+Behavior note:
+
+- If `target` is provided, the target column is excluded from `feature_profiles`.
+
+### `preml.recommendation_engine`
+
+#### `RecommendationEngine(config=None, enable_feature_engineering=True)`
+
+- `generate_recommendations(analysis_results)`
+- `summarize(recommendations)`
+
+Expected analysis input keys include:
+
+- `duplicates`, `infinite`, `missing`, `outliers`, `feature_profiles`, `correlation_pairs`, `target_profile`
+
+### `preml.preprocessing`
+
+#### `PreprocessingBuilder(analysis_result, config=None)`
+
+Builds sklearn-compatible preprocessing.
+
+Methods:
+
+- `build_pipeline() -> ColumnTransformer`
+- `fit(df) -> PreprocessingBuilder`
+- `transform(df) -> np.ndarray`
+- `fit_transform(df) -> np.ndarray`
+
+Important rules:
+
+- Pass feature DataFrames only (exclude target column).
+- `transform` requires prior `fit` or `fit_transform`.
+
+### `preml.feature_engineering`
+
+#### `FeatureEngineering(analysis_result, df=None, config=None)`
+
+- `suggest_features() -> List[Recommendation]`
+
+Suggestion categories include ratio, interaction, binning, power transform, datetime extraction, and categorical crossing where statistically justified.
+
+### `preml.model_utils`
+
+#### `compute_metrics(y_true, y_pred, task_type, extra_metrics=None)`
+
+Returns metric dictionary.
+
+#### `cross_validate(model, X, y, cv=5, scoring="r2", random_state=None, n_jobs=-1)`
+
+Returns metric -> fold-score lists.
+
+#### `BaselineTrainer(config=None)`
+
+Methods:
+
+- `build_model_pipeline(preprocessing_pipeline, task_type, estimator=None)`
+- `evaluate_baseline(pipeline, X, y, task_type, cv=5, scoring=None)`
+- `train_baselines(analysis_result, df, target_col, preprocessing_pipeline, cv=5)`
+
+`evaluate_baseline` output keys:
+
+- `cv_scores`
+- `mean_scores`
+- `std_scores`
+- `pipeline`
+
+### `preml.visualization`
+
+Key plotting APIs:
+
+- `plot_numeric_distributions(...)`
+- `plot_target_distribution(...)`
+- `plot_correlation_heatmap(...)`
+- `plot_top_correlations_bar(...)`
+- `plot_missing_heatmap(...)`
+- `plot_outlier_summary(...)`
+- `plot_target_correlations(...)`
+- `explain_visualizations(...)`
+
+### `preml.report`
+
+#### `ReportGenerator(analysis_result, df=None, config=None)`
+
+Methods:
+
+- `generate_text()`
+- `generate_markdown()`
+- `generate_html(embed_plots=True)`
+- `save_report(filepath, format="html", embed_plots=True)`
+
+Supported formats in `save_report`:
+
+- `html`
+- `md` or `markdown`
+- `txt` or `text`
+
+## Configuration Reference
+
+Use `MLToolkitConfig` to tune behavior:
+
+```python
 from preml.config import MLToolkitConfig
 
-# Create a reusable configuration object
-config = MLToolkitConfig(
-
-    # Maximum acceptable missing-value ratio
-    missing_threshold=0.30,
-
-    # Absolute correlation threshold
-    correlation_threshold=0.85,
-
-    # Threshold for recommending power transformations
-    skewness_threshold=1.0,
-
-    # Outlier detection algorithm
-    # Supported values:
-    #   "iqr"
-    #   "zscore"
-    outlier_method="iqr",
-
-    # Random seed for reproducible workflows
-    random_state=42,
-
-    # Maximum number of columns shown in plots
-    max_plot_cols=12,
-
-    # Default Matplotlib figure size
-    figure_size=(12, 8),
-
-    # Global plotting style
-    plot_style="whitegrid",
-
-    # Default visualization palette
-    color_palette="muted",
+cfg = MLToolkitConfig(
+     missing_threshold=0.25,
+     correlation_threshold=0.8,
+     skewness_threshold=1.0,
+     outlier_method="iqr",
+     high_cardinality_threshold=50,
+     max_unique_for_categorical_like=15,
+     random_state=42,
+     n_jobs=-1,
 )
 ```
 
----
-
-## Configuration Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `missing_threshold` | Missing-value threshold used for generating imputation recommendations. |
-| `correlation_threshold` | Minimum absolute correlation considered statistically significant. |
-| `skewness_threshold` | Threshold for recommending feature transformations. |
-| `outlier_method` | Outlier detection algorithm (`iqr` or `zscore`). |
-| `random_state` | Random seed used for reproducible experiments. |
-| `max_plot_cols` | Maximum number of columns included in generated visualizations. |
-| `figure_size` | Default figure size used by plotting functions. |
-| `plot_style` | Global Matplotlib plotting style. |
-| `color_palette` | Default visualization color palette. |
-
----
-
-## Using the Default Configuration
+### Adaptive configuration
 
 ```python
-# Import the default configuration
-from preml.config import default_config
-
-# Reuse the library's default settings
-config = default_config
+cfg = MLToolkitConfig().adapt_to_dataset(df)
 ```
 
----
+This adjusts selected thresholds based on dataset size/shape profile.
 
-## Passing Configuration to Components
+## Typical Workflows
 
-Every configurable component accepts the same `MLToolkitConfig` instance.
+### 1) Analysis only
 
 ```python
-# Import the main EDA component
 from preml.eda import EDAAnalyzer
 
-# Initialize the analyzer with a shared configuration
-analyzer = EDAAnalyzer(
-    df,
-    target="target",
-    config=config,
-)
+analysis = EDAAnalyzer(df, target="target").run()
 ```
 
-> **Best Practice**
->
-> Create a single configuration instance and reuse it across your entire workflow. This ensures consistent preprocessing behavior, statistical thresholds, visualization settings, and model recommendations.
+### 2) Recommendation only from precomputed stats
 
----
+```python
+from preml.statistics_engine import StatisticsEngine
+from preml.recommendation_engine import RecommendationEngine
 
-# Core Components
+stats = StatisticsEngine(df, target="target").run_full_analysis()
+recs = RecommendationEngine().generate_recommendations(stats)
+```
 
-PreML is organized into modular components that can be used independently or combined into a complete machine learning workflow.
+### 3) Preprocess train/test split
+
+```python
+from sklearn.model_selection import train_test_split
+from preml import quick_eda
+from preml.preprocessing import PreprocessingBuilder
+
+train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+analysis = quick_eda(train_df, target="target")
+
+builder = PreprocessingBuilder(analysis)
+X_train = train_df.drop(columns=["target"])
+X_test = test_df.drop(columns=["target"])
+
+builder.fit(X_train)
+X_train_t = builder.transform(X_train)
+X_test_t = builder.transform(X_test)
+```
+
+### 4) Report generation
+
+```python
+from preml import quick_eda
+from preml.report import ReportGenerator
+
+analysis = quick_eda(df, target="target")
+report = ReportGenerator(analysis, df=df)
+
+report.save_report("reports/eda", format="html", embed_plots=True)
+report.save_report("reports/eda", format="md")
+report.save_report("reports/eda", format="txt")
+```
+
+## Error Handling and Troubleshooting
+
+PreML raises domain-specific exceptions:
+
+- `DataValidationError`
+- `RecommendationError`
+- `PreprocessingError`
+- `ModelError`
+- `ReportError`
+- `VisualizationError`
+
+Common issues:
+
+1. `PreprocessingBuilder is not fitted`
+    - Fix: call `builder.fit(df)` before `builder.transform(df)`.
+2. Missing feature columns during transform
+    - Fix: ensure input columns match non-constant columns from `feature_profiles`.
+3. Target column not found
+    - Fix: pass exact target name or set `target=None`.
+4. Empty DataFrame validation error
+    - Fix: provide at least one row and one column.
+
+## FAQ
+
+1. Should I use `quick_eda` or `EDAAnalyzer`?
+    - Use `quick_eda` for concise scripts and `EDAAnalyzer` when you also want `summary()` and analyzer object lifecycle.
+
+2. Why is target not in `feature_profiles`?
+    - Target is intentionally excluded from feature profiling to prevent leakage into preprocessing.
+
+3. Does `PreprocessingBuilder` return sparse matrices?
+    - No. The current implementation returns dense NumPy arrays.
+
+4. How do I transform new data consistently?
+    - Fit once (`fit` or `fit_transform`) then call `transform` on future data.
+
+## Best Practices
+
+- Analyze on training data only.
+- Exclude target column before preprocessing transformation.
+- Persist fitted preprocessing and model together.
+- Keep one shared config object per experiment for consistency.
+- Validate generated recommendations against domain constraints.
+
+## Performance and Scalability Guidance
+
+- Use `n_jobs=-1` for parallel CV where appropriate.
+- Reduce plotting load with `max_plot_cols`.
+- For very large datasets, call `adapt_to_dataset` to tighten defaults.
+- Limit report embedding if HTML size becomes large (`embed_plots=False`).
+
+## Pipeline Persistence
+
+```python
+import joblib
+
+# After fitting
+joblib.dump(builder, "artifacts/preprocessor_builder.joblib")
+
+# Later
+builder_loaded = joblib.load("artifacts/preprocessor_builder.joblib")
+X_new = builder_loaded.transform(new_df)
+```
+
+## sklearn Integration Notes
+
+- `PreprocessingBuilder.build_pipeline()` returns a `ColumnTransformer`.
+- Use with estimators in `sklearn.pipeline.Pipeline`.
+- `BaselineTrainer` can attach estimators and run cross-validation.
+
+## Migration Notes
+
+If you are upgrading from earlier docs/examples:
+
+- Use `EDAAnalyzer.run()` as canonical analysis entrypoint.
+- `PreprocessingBuilder` supports `fit`, `transform`, and `fit_transform`.
+- Use `evaluate_baseline` output key `cv_scores` (not `fold_scores`).
+- Install package as `pypreml` from PyPI.
+
+## License
+
+MIT License.
 
 Each component has a well-defined responsibility and communicates through standardized data structures, making the library easy to extend, test, and integrate into existing projects.
 

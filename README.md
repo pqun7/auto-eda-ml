@@ -1,3 +1,6 @@
+![CI](https://github.com/pqun7/preml/actions/workflows/ci.yml/badge.svg)
+![PyPI](https://img.shields.io/pypi/v/pypreml.svg)
+![Python](https://img.shields.io/pypi/pyversions/pypreml.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 # PreML
 
@@ -7,6 +10,7 @@ Production‑ready machine learning toolkit for EDA, preprocessing, and modellin
 - Fast and automated Exploratory Data Analysis (EDA).
 - Robust preprocessing pipelines.
 - Production-ready machine learning modelling wrappers.
+- sklearn-style preprocessing lifecycle (`fit`, `transform`, `fit_transform`).
 
 ## ⚙️ Installation
 
@@ -63,7 +67,7 @@ Use this map to understand how the current files fit together:
 ### From source
 
 ```bash
-git clone https://github.com/alinazer30/preml.git
+git clone https://github.com/pqun7/preml.git
 cd preml
 python -m pip install -e .
 ```
@@ -99,8 +103,12 @@ print(analyzer.summary())
 
 # Build a preprocessing pipeline from the analysis output
 builder = PreprocessingBuilder(analysis)
+X_train = df.drop(columns=["target_column"])
 pipeline = builder.build_pipeline()
-X = builder.fit_transform(df)
+X = builder.fit_transform(X_train)
+
+# Later, transform new data using the fitted builder
+# X_new = builder.transform(new_features_df)
 ```
 
 ## Typical Workflow
@@ -140,6 +148,7 @@ config = MLToolkitConfig(
     missing_threshold=0.2,
     correlation_threshold=0.85,
     random_state=42,
+    n_jobs=-1,
 )
 
 analyzer = EDAAnalyzer(df, target="target_column", config=config)
@@ -196,6 +205,20 @@ python -m py_compile preml/preprocessing.py preml/eda.py preml/recommendation_en
 ## Contributing
 
 Contributions are welcome. Keep changes aligned with the existing architecture, preserve the separation between facts and recommendations, and add tests when you change behaviour.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
+
+## Security
+
+Please report vulnerabilities according to [SECURITY.md](SECURITY.md).
+
+## Changelog
+
+Release history is documented in [CHANGELOG.md](CHANGELOG.md).
+
+## Code of Conduct
+
+Community standards are documented in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
